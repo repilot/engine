@@ -5,9 +5,10 @@
 group("flutter") {
   testonly = true
 
+  deps = [ "//flutter/sky" ]
+
   if (is_fuchsia) {
-    # TODO(abarth) Remove this specific list once Fuchsia can build everything.
-    deps = [
+    deps += [
       "//flutter/content_handler",
       "//flutter/examples",
       "//flutter/flow",
@@ -15,9 +16,14 @@ group("flutter") {
       "//flutter/snapshotter",
       "//flutter/snapshotter($host_toolchain)",
     ]
-  } else {
-    deps = [
-      "//flutter/sky",
+  }
+
+  # If on the host, compile all unittests targets.
+  if (current_toolchain == host_toolchain) {
+    deps += [
+      "//flutter/sky/engine/wtf:wtf_unittests",
+      "//flutter/synchronization:synchronization_unittests",
+      "//lib/ftl:ftl_unittests",
     ]
   }
 }

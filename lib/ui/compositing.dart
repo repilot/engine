@@ -185,30 +185,35 @@ class SceneBuilder extends NativeFieldWrapperClass2 {
   }
   void _addPicture(double dx, double dy, Picture picture, int hints) native "SceneBuilder_addPicture";
 
-  /// (mojo-only) Adds a scene rendered by another application to the scene for
-  /// this application.
+  /// (Fuchsia-only) Adds a scene rendered by another application to the scene
+  /// for this application.
   ///
   /// Applications typically obtain scene tokens when embedding other views via
-  /// the Mojo view manager, but this function is agnostic as to the source of
-  /// scene token.
-  void addChildScene(Offset offset,
-                     double devicePixelRatio,
-                     int physicalWidth,
-                     int physicalHeight,
-                     int sceneToken) {
+  /// the Fuchsia view manager, but this function is agnostic as to the source
+  /// of scene token.
+  void addChildScene({
+    Offset offset: Offset.zero,
+    double devicePixelRatio: 1.0,
+    int physicalWidth: 0,
+    int physicalHeight: 0,
+    int sceneToken,
+    bool hitTestable: true
+  }) {
     _addChildScene(offset.dx,
                    offset.dy,
                    devicePixelRatio,
                    physicalWidth,
                    physicalHeight,
-                   sceneToken);
+                   sceneToken,
+                   hitTestable);
   }
   void _addChildScene(double dx,
                       double dy,
                       double devicePixelRatio,
                       int physicalWidth,
                       int physicalHeight,
-                      int sceneToken) native "SceneBuilder_addChildScene";
+                      int sceneToken,
+                      bool hitTestable) native "SceneBuilder_addChildScene";
 
   /// Sets a threshold after which additional debugging information should be recorded.
   ///
@@ -217,6 +222,23 @@ class SceneBuilder extends NativeFieldWrapperClass2 {
   /// We'll hopefully be able to figure out how to make this feature more useful
   /// to you.
   void setRasterizerTracingThreshold(int frameInterval) native "SceneBuilder_setRasterizerTracingThreshold";
+
+  /// Sets whether the raster cache should checkerboard cached entries. This is
+  /// only useful for debugging purposes.
+  ///
+  /// The compositor can sometimes decide to cache certain portions of the
+  /// widget hierarchy. Such portions typically don't change often from frame to
+  /// frame and are expensive to render. This can speed up overall rendering. However,
+  /// there is certain upfront cost to constructing these cache entries. And, if
+  /// the cache entries are not used very often, this cost may not be worth the
+  /// speedup in rendering of subsequent frames. If the developer wants to be certain
+  /// that populating the raster cache is not causing stutters, this option can be
+  /// set. Depending on the observations made, hints can be provided to the compositor
+  /// that aid it in making better decisions about caching.
+  ///
+  /// Currently this interface is difficult to use by end-developers. If you're
+  /// interested in using this feature, please contact [flutter-dev](https://groups.google.com/forum/#!forum/flutter-dev).
+  void setCheckerboardRasterCacheImages(bool checkerboard) native "SceneBuilder_setCheckerboardRasterCacheImages";
 
   /// Finishes building the scene.
   ///

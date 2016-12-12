@@ -8,11 +8,10 @@
 #include <memory>
 
 #include "base/mac/scoped_nsobject.h"
-#include "flutter/services/platform/app_messages.mojom.h"
 #include "flutter/shell/common/platform_view.h"
 #include "flutter/shell/gpu/gpu_surface_gl.h"
 #include "flutter/shell/platform/darwin/ios/framework/Source/accessibility_bridge.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/application_messages_impl.h"
+#include "flutter/shell/platform/darwin/ios/framework/Source/platform_message_router.h"
 #include "lib/ftl/macros.h"
 #include "lib/ftl/memory/weak_ptr.h"
 
@@ -31,13 +30,15 @@ class PlatformViewIOS : public PlatformView, public GPUSurfaceGLDelegate {
 
   void ToggleAccessibility(UIView* view, bool enabled);
 
-  void ConnectToEngineAndSetupServices();
+  PlatformMessageRouter& platform_message_router() {
+    return platform_message_router_;
+  }
 
-  sky::SkyEnginePtr& engineProxy();
+  ftl::WeakPtr<PlatformViewIOS> GetWeakPtr();
 
-  flutter::platform::ApplicationMessagesPtr& AppMessageSender();
+  void UpdateSurfaceSize();
 
-  ApplicationMessagesImpl& AppMessageReceiver();
+  VsyncWaiter* GetVsyncWaiter() override;
 
   bool ResourceContextMakeCurrent() override;
 
@@ -49,23 +50,24 @@ class PlatformViewIOS : public PlatformView, public GPUSurfaceGLDelegate {
 
   intptr_t GLContextFBO() const override;
 
-  void RunFromSource(const std::string& main,
-                     const std::string& packages,
-                     const std::string& assets_directory) override;
+  void HandlePlatformMessage(
+      ftl::RefPtr<blink::PlatformMessage> message) override;
 
   void UpdateSemantics(std::vector<blink::SemanticsNode> update) override;
 
+  void RunFromSource(const std::string& assets_directory,
+                     const std::string& main,
+                     const std::string& packages) override;
+
  private:
   std::unique_ptr<IOSGLContext> context_;
-  sky::SkyEnginePtr engine_;
-  mojo::ServiceProviderPtr dart_services_;
-  flutter::platform::ApplicationMessagesPtr app_message_sender_;
-  ApplicationMessagesImpl app_message_receiver_;
+  PlatformMessageRouter platform_message_router_;
   std::unique_ptr<AccessibilityBridge> accessibility_bridge_;
+  ftl::WeakPtrFactory<PlatformViewIOS> weak_factory_;
 
-  void SetupAndLoadFromSource(const std::string& main,
-                              const std::string& packages,
-                              const std::string& assets_directory);
+  void SetupAndLoadFromSource(const std::string& assets_directory,
+                              const std::string& main,
+                              const std::string& packages);
 
   FTL_DISALLOW_COPY_AND_ASSIGN(PlatformViewIOS);
 };

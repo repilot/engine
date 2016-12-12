@@ -42,8 +42,6 @@ namespace blink {
 #define DECLARE_FUNCTION(name, count) \
   extern void name(Dart_NativeArguments args);
 
-// Lists the native functions implementing basic functionality in
-// the Mojo embedder dart, such as printing, and file I/O.
 #define BUILTIN_NATIVE_LIST(V) \
   V(Logger_PrintString, 1)     \
   V(ScheduleMicrotask, 1)
@@ -74,21 +72,17 @@ static void InitDartInternal(Dart_Handle builtin_library,
     // Call |_setupHooks| to configure |VMLibraryHooks|.
     Dart_Handle method_name = Dart_NewStringFromCString("_setupHooks");
     DART_CHECK_VALID(Dart_Invoke(builtin_library, method_name, 0, NULL))
-
-    // Call |_setupHooks| to configure |VMLibraryHooks|.
-    Dart_Handle isolate_lib = Dart_LookupLibrary(ToDart("dart:isolate"));
-    DART_CHECK_VALID(isolate_lib);
-    DART_CHECK_VALID(Dart_Invoke(isolate_lib, method_name, 0, NULL));
-  } else {
-    FTL_CHECK(isolate_type == DartRuntimeHooks::SecondaryIsolate);
-    Dart_Handle io_lib = Dart_LookupLibrary(ToDart("dart:io"));
-    DART_CHECK_VALID(io_lib);
-    Dart_Handle setup_hooks = Dart_NewStringFromCString("_setupHooks");
-    DART_CHECK_VALID(Dart_Invoke(io_lib, setup_hooks, 0, NULL));
-    Dart_Handle isolate_lib = Dart_LookupLibrary(ToDart("dart:isolate"));
-    DART_CHECK_VALID(isolate_lib);
-    DART_CHECK_VALID(Dart_Invoke(isolate_lib, setup_hooks, 0, NULL));
   }
+
+  Dart_Handle setup_hooks = Dart_NewStringFromCString("_setupHooks");
+
+  Dart_Handle io_lib = Dart_LookupLibrary(ToDart("dart:io"));
+  DART_CHECK_VALID(io_lib);
+  DART_CHECK_VALID(Dart_Invoke(io_lib, setup_hooks, 0, NULL));
+
+  Dart_Handle isolate_lib = Dart_LookupLibrary(ToDart("dart:isolate"));
+  DART_CHECK_VALID(isolate_lib);
+  DART_CHECK_VALID(Dart_Invoke(isolate_lib, setup_hooks, 0, NULL));
 }
 
 static void InitDartCore(Dart_Handle builtin, const std::string& script_uri) {
@@ -119,7 +113,7 @@ static void InitDartAsync(Dart_Handle builtin_library,
                                &schedule_microtask));
 }
 
-static void InitDartIo(const std::string& script_uri) {
+static void InitDartIO(const std::string& script_uri) {
   if (!script_uri.empty()) {
     Dart_Handle io_lib = Dart_LookupLibrary(ToDart("dart:io"));
     DART_CHECK_VALID(io_lib);
@@ -138,7 +132,7 @@ void DartRuntimeHooks::Install(IsolateType isolate_type,
   InitDartInternal(builtin, isolate_type);
   InitDartCore(builtin, script_uri);
   InitDartAsync(builtin, isolate_type);
-  InitDartIo(script_uri);
+  InitDartIO(script_uri);
 }
 
 // Implementation of native functions which are used for some

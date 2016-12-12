@@ -24,7 +24,6 @@
 #include "flutter/common/settings.h"
 #include "flutter/glue/trace_event.h"
 #include "flutter/lib/io/dart_io.h"
-#include "flutter/lib/mojo/dart_mojo_internal.h"
 #include "flutter/lib/ui/dart_runtime_hooks.h"
 #include "flutter/lib/ui/dart_ui.h"
 #include "flutter/lib/ui/ui_dart_state.h"
@@ -48,7 +47,6 @@
 #include "lib/tonic/scopes/dart_api_scope.h"
 #include "lib/tonic/scopes/dart_isolate_scope.h"
 #include "lib/tonic/typed_data/uint8_list.h"
-#include "mojo/public/platform/dart/dart_handle_watcher.h"
 
 #if defined(OS_ANDROID)
 #include "flutter/lib/jni/dart_jni.h"
@@ -80,18 +78,6 @@ const char kSnapshotAssetKey[] = "snapshot_blob.bin";
 
 namespace {
 
-static const char* kDartProfilingArgs[] = {
-    // Dart assumes ARM devices are insufficiently powerful and sets the
-    // default profile period to 100Hz. This number is suitable for older
-    // Raspberry Pi devices but quite low for current smartphones.
-    "--profile_period=1000",
-#if (WTF_OS_IOS || WTF_OS_MACOSX)
-    // On platforms where LLDB is the primary debugger, SIGPROF signals
-    // overwhelm LLDB.
-    "--no-profiler",
-#endif
-};
-
 static const char* kDartMirrorsArgs[] = {
     "--enable_mirrors=false",
 };
@@ -102,6 +88,10 @@ static const char* kDartPrecompilationArgs[] = {
 
 static const char* kDartBackgroundCompilationArgs[] = {
     "--background_compilation",
+};
+
+static const char* kDartWriteProtectCodeArgs[] FTL_ALLOW_UNUSED_TYPE = {
+    "--no_write_protect_code",
 };
 
 static const char* kDartCheckedModeArgs[] = {
@@ -136,8 +126,7 @@ RegisterNativeServiceProtocolExtensionHook
 void IsolateShutdownCallback(void* callback_data) {
   if (tonic::DartStickyError::IsSet()) {
     tonic::DartApiScope api_scope;
-    FTL_LOG(ERROR) << "Isolate "
-                   << tonic::StdStringFromDart(Dart_DebugName())
+    FTL_LOG(ERROR) << "Isolate " << tonic::StdStringFromDart(Dart_DebugName())
                    << " exited with an error";
     Dart_Handle sticky_error = Dart_GetStickyError();
     FTL_CHECK(LogIfError(sticky_error));
@@ -191,9 +180,8 @@ static bool StringEndsWith(const std::string& string,
   if (ending.size() > string.size())
     return false;
 
-  return string.compare(string.size() - ending.size(),
-                        ending.size(),
-                        ending) == 0;
+  return string.compare(string.size() - ending.size(), ending.size(), ending) ==
+         0;
 }
 
 #if FLUTTER_RUNTIME_MODE == FLUTTER_RUNTIME_MODE_RELEASE
@@ -210,8 +198,8 @@ Dart_Isolate ServiceIsolateCreateCallback(const char* script_uri,
   tonic::DartState* dart_state = new tonic::DartState();
   Dart_Isolate isolate = Dart_CreateIsolate(
       script_uri, "main",
-      reinterpret_cast<const uint8_t*>(DART_SYMBOL(kDartIsolateSnapshotBuffer)),
-      nullptr, dart_state, error);
+      reinterpret_cast<const uint8_t*>(DART_SYMBOL(kIsolateSnapshot)), nullptr,
+      dart_state, error);
   FTL_CHECK(isolate) << error;
   dart_state->SetIsolate(isolate);
   FTL_CHECK(Dart_IsServiceIsolate(isolate));
@@ -221,7 +209,6 @@ Dart_Isolate ServiceIsolateCreateCallback(const char* script_uri,
     tonic::DartApiScope dart_api_scope;
     DartIO::InitForIsolate();
     DartUI::InitForIsolate();
-    DartMojoInternal::InitForIsolate();
     DartRuntimeHooks::Install(DartRuntimeHooks::SecondaryIsolate, script_uri);
     const Settings& settings = Settings::Get();
     if (settings.enable_observatory) {
@@ -263,23 +250,25 @@ Dart_Isolate IsolateCreateCallback(const char* script_uri,
     return ServiceIsolateCreateCallback(script_uri, error);
   }
 
-  // Assert that entry script URI starts with file://
   std::string entry_uri = script_uri;
-  FTL_CHECK(entry_uri.find(kFileUriPrefix) == 0u);
-  // Entry script path (file:// is stripped).
-  std::string entry_path(script_uri + strlen(kFileUriPrefix));
-  // Are we running a .dart source file?
-  const bool running_from_source = StringEndsWith(entry_path, ".dart");
+  // Are we running from a Dart source file?
+  const bool running_from_source = StringEndsWith(entry_uri, ".dart");
 
   std::vector<uint8_t> snapshot_data;
-  if (!IsRunningPrecompiledCode() && !running_from_source) {
-    // Attempt to copy the snapshot from the asset bundle.
-    const std::string& bundle_path = entry_path;
-    ftl::RefPtr<ZipAssetStore> zip_asset_store =
-        ftl::MakeRefCounted<ZipAssetStore>(
-            GetUnzipperProviderForPath(std::move(bundle_path)),
-            ftl::RefPtr<ftl::TaskRunner>());
-    zip_asset_store->GetAsBuffer(kSnapshotAssetKey, &snapshot_data);
+  std::string entry_path;
+  if (!IsRunningPrecompiledCode()) {
+    // Assert that entry script URI starts with file://
+    FTL_CHECK(entry_uri.find(kFileUriPrefix) == 0u);
+    // Entry script path (file:// is stripped).
+    entry_path = std::string(script_uri + strlen(kFileUriPrefix));
+    if (!running_from_source) {
+      // Attempt to copy the snapshot from the asset bundle.
+      const std::string& bundle_path = entry_path;
+      ftl::RefPtr<ZipAssetStore> zip_asset_store =
+          ftl::MakeRefCounted<ZipAssetStore>(
+              GetUnzipperProviderForPath(std::move(bundle_path)));
+      zip_asset_store->GetAsBuffer(kSnapshotAssetKey, &snapshot_data);
+    }
   }
 
   UIDartState* parent_dart_state = static_cast<UIDartState*>(callback_data);
@@ -287,8 +276,8 @@ Dart_Isolate IsolateCreateCallback(const char* script_uri,
 
   Dart_Isolate isolate = Dart_CreateIsolate(
       script_uri, main,
-      reinterpret_cast<uint8_t*>(DART_SYMBOL(kDartIsolateSnapshotBuffer)),
-      nullptr, dart_state, error);
+      reinterpret_cast<uint8_t*>(DART_SYMBOL(kIsolateSnapshot)), nullptr,
+      dart_state, error);
   FTL_CHECK(isolate) << error;
   dart_state->SetIsolate(isolate);
   FTL_CHECK(!LogIfError(
@@ -298,7 +287,6 @@ Dart_Isolate IsolateCreateCallback(const char* script_uri,
     tonic::DartApiScope dart_api_scope;
     DartIO::InitForIsolate();
     DartUI::InitForIsolate();
-    DartMojoInternal::InitForIsolate();
     DartRuntimeHooks::Install(DartRuntimeHooks::SecondaryIsolate, script_uri);
 
     std::unique_ptr<DartClassProvider> ui_class_provider(
@@ -318,7 +306,8 @@ Dart_Isolate IsolateCreateCallback(const char* script_uri,
       // We are running from a script snapshot.
       FTL_CHECK(!LogIfError(Dart_LoadScriptFromSnapshot(snapshot_data.data(),
                                                         snapshot_data.size())));
-    } else {
+    } else if (running_from_source) {
+      // We are running from source.
       // Forward the .packages configuration from the parent isolate to the
       // child isolate.
       tonic::FileLoader& parent_loader = parent_dart_state->file_loader();
@@ -327,7 +316,7 @@ Dart_Isolate IsolateCreateCallback(const char* script_uri,
       if (!packages.empty() && !loader.LoadPackagesMap(packages)) {
         FTL_LOG(WARNING) << "Failed to load package map: " << packages;
       }
-      // We are running from source.
+      // Load the script.
       FTL_CHECK(!LogIfError(loader.LoadScript(entry_path)));
     }
 
@@ -384,9 +373,8 @@ DartJniIsolateData* GetDartJniDataForCurrentIsolate() {
 
 #if DART_ALLOW_DYNAMIC_RESOLUTION
 
-constexpr char kDartVmIsolateSnapshotBufferName[] =
-    "kDartVmIsolateSnapshotBuffer";
-constexpr char kDartIsolateSnapshotBufferName[] = "kDartIsolateSnapshotBuffer";
+constexpr char kVmIsolateSnapshotName[] = "kVmIsolateSnapshot";
+constexpr char kIsolateSnapshotName[] = "kIsolateSnapshot";
 constexpr char kInstructionsSnapshotName[] = "kInstructionsSnapshot";
 constexpr char kDataSnapshotName[] = "kDataSnapshot";
 
@@ -415,12 +403,20 @@ void* _DartSymbolLookup(const char* symbol_name) {
     return nullptr;
   }
 
+  const char* application_library_path = kDartApplicationLibraryPath;
+  const Settings& settings = Settings::Get();
+  const std::string& application_library_path_setting =
+      settings.application_library_path;
+  if (!application_library_path_setting.empty()) {
+    application_library_path = application_library_path_setting.c_str();
+  }
+
   // First the application library is checked for the valid symbols. This
   // library may not necessarily exist. If it does exist, it is loaded and the
   // symbols resolved. Once the application library is loaded, there is
   // currently no provision to unload the same.
   void* symbol =
-      DartLookupSymbolInLibrary(symbol_name, kDartApplicationLibraryPath);
+      DartLookupSymbolInLibrary(symbol_name, application_library_path);
   if (symbol != nullptr) {
     return symbol;
   }
@@ -441,9 +437,9 @@ struct SymbolAsset {
 };
 
 static SymbolAsset g_symbol_assets[] = {
-    {kDartVmIsolateSnapshotBufferName, "snapshot_aot_vmisolate", false,
+    {kVmIsolateSnapshotName, "snapshot_aot_vmisolate", false,
      offsetof(Settings, aot_vm_isolate_snapshot_file_name)},
-    {kDartIsolateSnapshotBufferName, "snapshot_aot_isolate", false,
+    {kIsolateSnapshotName, "snapshot_aot_isolate", false,
      offsetof(Settings, aot_isolate_snapshot_file_name)},
     {kInstructionsSnapshotName, "snapshot_aot_instr", true,
      offsetof(Settings, aot_instructions_blob_file_name)},
@@ -553,6 +549,30 @@ static void EmbedderTimelineStopRecording() {
     g_tracing_callbacks->stop_tracing_callback();
 }
 
+static std::vector<const char*> ProfilingFlags(bool enable_profiling) {
+// Disable Dart's built in profiler when building a debug build. This
+// works around a race condition that would sometimes stop a crash's
+// stack trace from being printed on Android.
+#ifndef NDEBUG
+  enable_profiling = false;
+#endif
+
+  // We want to disable profiling by default because it overwhelms LLDB. But
+  // the VM enables the same by default. In either case, we have some profiling
+  // flags.
+  if (enable_profiling) {
+    return {
+        // Dart assumes ARM devices are insufficiently powerful and sets the
+        // default profile period to 100Hz. This number is suitable for older
+        // Raspberry Pi devices but quite low for current smartphones.
+        "--profile_period=1000",
+        // This is the default. But just be explicit.
+        "--profiler"};
+  } else {
+    return {"--no-profiler"};
+  }
+}
+
 void SetServiceIsolateHook(ServiceIsolateHook hook) {
   FTL_CHECK(!g_service_isolate_initialized);
   g_service_isolate_hook = hook;
@@ -586,9 +606,6 @@ void InitDartVM() {
     }
   }
 
-  DartMojoInternal::SetHandleWatcherProducerHandle(
-      mojo::dart::HandleWatcher::Start());
-
   std::vector<const char*> args;
 
   // Instruct the VM to ignore unrecognized flags.
@@ -597,7 +614,11 @@ void InitDartVM() {
   // it does not recognize, it exits immediately.
   args.push_back("--ignore-unrecognized-flags");
 
-  PushBackAll(&args, kDartProfilingArgs, arraysize(kDartProfilingArgs));
+  for (const auto& profiler_flag :
+       ProfilingFlags(settings.enable_dart_profiling)) {
+    args.push_back(profiler_flag);
+  }
+
   PushBackAll(&args, kDartMirrorsArgs, arraysize(kDartMirrorsArgs));
   PushBackAll(&args, kDartBackgroundCompilationArgs,
               arraysize(kDartBackgroundCompilationArgs));
@@ -607,11 +628,25 @@ void InitDartVM() {
                 arraysize(kDartPrecompilationArgs));
   }
 
-  if (!IsRunningPrecompiledCode()) {
-    // Enable checked mode if we are not running precompiled code. We run non-
-    // precompiled code only in the debug product mode.
+#if defined(OS_FUCHSIA) && defined(NDEBUG)
+  // Do not enable checked mode for Fuchsia release builds
+  // TODO(mikejurka): remove this once precompiled code is working on Fuchsia
+  const bool use_checked_mode = false;
+#else
+  // Enable checked mode if we are not running precompiled code. We run non-
+  // precompiled code only in the debug product mode.
+  const bool use_checked_mode = !IsRunningPrecompiledCode();
+#endif
+
+#if FLUTTER_RUNTIME_MODE == FLUTTER_RUNTIME_MODE_DEBUG
+  // Debug mode uses the JIT, disable code page write protection to avoid
+  // memory page protection changes before and after every compilation.
+  PushBackAll(&args, kDartWriteProtectCodeArgs,
+              arraysize(kDartWriteProtectCodeArgs));
+#endif
+
+  if (use_checked_mode)
     PushBackAll(&args, kDartCheckedModeArgs, arraysize(kDartCheckedModeArgs));
-  }
 
   if (settings.start_paused)
     PushBackAll(&args, kDartStartPausedArgs, arraysize(kDartStartPausedArgs));
@@ -657,7 +692,7 @@ void InitDartVM() {
     Dart_InitializeParams params = {};
     params.version = DART_INITIALIZE_PARAMS_CURRENT_VERSION;
     params.vm_isolate_snapshot =
-        reinterpret_cast<uint8_t*>(DART_SYMBOL(kDartVmIsolateSnapshotBuffer));
+        reinterpret_cast<uint8_t*>(DART_SYMBOL(kVmIsolateSnapshot));
     params.instructions_snapshot = PrecompiledInstructionsSymbolIfPresent();
     params.data_snapshot = PrecompiledDataSnapshotSymbolIfPresent();
     params.create = IsolateCreateCallback;

@@ -5,47 +5,44 @@
 assert(is_fuchsia)
 
 executable("content_handler") {
-  output_name = "flutter_content_handler"
+  output_name = "flutter_runner"
 
   sources = [
-    "application_impl.cc",
-    "application_impl.h",
-    "content_handler_impl.cc",
-    "content_handler_impl.h",
+    "app.cc",
+    "app.h",
+    "application_controller_impl.cc",
+    "application_controller_impl.h",
     "main.cc",
     "rasterizer.cc",
     "rasterizer.h",
     "runtime_holder.cc",
     "runtime_holder.h",
-    "skia_surface_holder.cc",
-    "skia_surface_holder.h",
   ]
 
   deps = [
-    "//apps/mozart/services/composition/interfaces",
-    "//apps/mozart/services/input/interfaces",
-    "//apps/mozart/services/views/interfaces",
-    "//dart/runtime:libdart",
+    "//apps/modular/lib/app",
+    "//apps/mozart/lib/skia:vmo",
+    "//apps/mozart/services/buffers",
+    "//apps/mozart/services/buffers/cpp",
+    "//apps/mozart/services/composition",
+    "//apps/mozart/services/input",
+    "//apps/mozart/services/views",
+    "//apps/tracing/lib/trace:provider",
     "//dart/runtime/vm:libdart_platform",
+    "//dart/runtime:libdart",
     "//flutter/assets",
     "//flutter/common",
     "//flutter/flow",
     "//flutter/glue",
     "//flutter/lib/ui",
     "//flutter/runtime",
-    "//flutter/services/engine:interfaces",
     "//flutter/sky/engine/platform",
+    "//lib/fidl/dart/sdk_ext",
     "//lib/ftl",
     "//lib/mtl",
+    "//lib/tonic/mx",
     "//lib/zip",
-    "//mojo/public/cpp/application",
-    "//mojo/public/cpp/bindings",
-    "//mojo/public/cpp/system",
-    "//mojo/public/interfaces/application",
-    "//mojo/services/asset_bundle/interfaces",
-    "//mojo/services/content_handler/interfaces",
-    "//mojo/services/framebuffer/interfaces",
-    "//mojo/system",
+    "//third_party/rapidjson",
     "//third_party/skia",
 
     # TODO(abarth): We shouldn't need to depend on libdart_builtin but we fail

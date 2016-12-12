@@ -30,27 +30,14 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeProvider;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import org.chromium.base.CalledByNative;
 import org.chromium.base.JNINamespace;
-import org.chromium.mojo.bindings.Interface.Binding;
-import org.chromium.mojo.bindings.InterfaceRequest;
-import org.chromium.mojo.system.Core;
-import org.chromium.mojo.system.MessagePipeHandle;
-import org.chromium.mojo.system.MojoException;
-import org.chromium.mojo.system.Pair;
-import org.chromium.mojo.system.impl.CoreImpl;
-import org.chromium.mojom.editing.Keyboard;
-import org.chromium.mojom.flutter.platform.ApplicationMessages;
-import org.chromium.mojom.mojo.ServiceProvider;
-import org.chromium.mojom.raw_keyboard.RawKeyboardService;
-import org.chromium.mojom.sky.AppLifecycleState;
-import org.chromium.mojom.sky.ServicesData;
-import org.chromium.mojom.sky.SkyEngine;
-import org.chromium.mojom.sky.ViewportMetrics;
 
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -60,38 +47,37 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-import org.domokit.common.ActivityLifecycleListener;
-import org.domokit.activity.ActivityImpl;
-import org.domokit.editing.KeyboardImpl;
-import org.domokit.editing.KeyboardViewState;
-import org.domokit.raw_keyboard.RawKeyboardServiceImpl;
-import org.domokit.raw_keyboard.RawKeyboardServiceState;
+import io.flutter.plugin.common.ActivityLifecycleListener;
+import io.flutter.plugin.editing.TextInputPlugin;
+import io.flutter.plugin.platform.PlatformPlugin;
 
 /**
  * An Android view containing a Flutter app.
  */
 @JNINamespace("shell")
 public class FlutterView extends SurfaceView
-  implements AccessibilityManager.AccessibilityStateChangeListener,
-             AccessibilityManager.TouchExplorationStateChangeListener {
+  implements AccessibilityManager.AccessibilityStateChangeListener {
     private static final String TAG = "FlutterView";
 
     private static final String ACTION_DISCOVER = "io.flutter.view.DISCOVER";
 
+    class ViewportMetrics {
+        float devicePixelRatio = 1.0f;
+        int physicalWidth = 0;
+        int physicalHeight = 0;
+        int physicalPaddingTop = 0;
+        int physicalPaddingRight = 0;
+        int physicalPaddingBottom = 0;
+        int physicalPaddingLeft = 0;
+    }
+
     private long mNativePlatformView;
-    private SkyEngine.Proxy mSkyEngine;
-    private ServiceProviderImpl mPlatformServiceProvider;
-    private Binding mPlatformServiceProviderBinding;
-    private ServiceProviderImpl mViewServiceProvider;
-    private Binding mViewServiceProviderBinding;
-    private ServiceProvider.Proxy mDartServiceProvider;
-    private ApplicationMessages.Proxy mFlutterAppMessages;
+    private TextInputPlugin mTextInputPlugin;
+
     private HashMap<String, OnMessageListener> mOnMessageListeners;
     private HashMap<String, OnMessageListenerAsync> mAsyncOnMessageListeners;
     private final SurfaceHolder.Callback mSurfaceCallback;
     private final ViewportMetrics mMetrics;
-    private final KeyboardViewState mKeyboardState;
-    private final RawKeyboardServiceState mRawKeyboardState;
     private final AccessibilityManager mAccessibilityManager;
     private BroadcastReceiver discoveryReceiver;
     private List<ActivityLifecycleListener> mActivityLifecycleListeners;
@@ -102,10 +88,6 @@ public class FlutterView extends SurfaceView
 
     public FlutterView(Context context, AttributeSet attrs) {
         super(context, attrs);
-
-        // TODO(abarth): Remove this static and instead make everything that
-        // depends on it into a view-associated service.
-        ActivityImpl.setCurrentActivity((Activity) context);
 
         mMetrics = new ViewportMetrics();
         mMetrics.devicePixelRatio = context.getResources().getDisplayMetrics().density;
@@ -144,17 +126,6 @@ public class FlutterView extends SurfaceView
         };
         getHolder().addCallback(mSurfaceCallback);
 
-        mKeyboardState = new KeyboardViewState(this);
-        mRawKeyboardState = new RawKeyboardServiceState();
-
-        Core core = CoreImpl.getInstance();
-
-        mPlatformServiceProvider = new ServiceProviderImpl(core, this, ServiceRegistry.SHARED);
-
-        ServiceRegistry localRegistry = new ServiceRegistry();
-        configureLocalServices(localRegistry);
-        mViewServiceProvider = new ServiceProviderImpl(core, this, localRegistry);
-
         mAccessibilityManager = (AccessibilityManager)getContext().getSystemService(Context.ACCESSIBILITY_SERVICE);
 
         mOnMessageListeners = new HashMap<String, OnMessageListener>();
@@ -163,28 +134,53 @@ public class FlutterView extends SurfaceView
 
         setLocale(getResources().getConfiguration().locale);
 
+        // Configure the platform plugin.
+        PlatformPlugin platformPlugin = new PlatformPlugin((Activity)getContext());
+        addOnMessageListener("flutter/platform", platformPlugin);
+        addActivityLifecycleListener(platformPlugin);
+        mTextInputPlugin = new TextInputPlugin((Activity)getContext());
+        addOnMessageListener("flutter/textinput", mTextInputPlugin);
+
         if ((context.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             discoveryReceiver = new DiscoveryReceiver();
             context.registerReceiver(discoveryReceiver, new IntentFilter(ACTION_DISCOVER));
         }
     }
 
+    private void encodeKeyEvent(KeyEvent event, JSONObject message) throws JSONException {
+        message.put("flags", event.getFlags());
+        message.put("codePoint", event.getUnicodeChar());
+        message.put("keyCode", event.getKeyCode());
+        message.put("scanCode", event.getScanCode());
+        message.put("metaState", event.getMetaState());
+    }
+
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (mRawKeyboardState.onKey(this, keyCode, event))
-            return true;
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", "keyup");
+            message.put("keymap", "android");
+            encodeKeyEvent(event, message);
+            sendPlatformMessage("flutter/keyevent", message.toString(), null);
+        } catch (JSONException e) {
+            Log.e(TAG, "Failed to serialize key event", e);
+        }
         return super.onKeyUp(keyCode, event);
     }
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (mRawKeyboardState.onKey(this, keyCode, event))
-            return true;
+        try {
+            JSONObject message = new JSONObject();
+            message.put("type", "keydown");
+            message.put("keymap", "android");
+            encodeKeyEvent(event, message);
+            sendPlatformMessage("flutter/keyevent", message.toString(), null);
+        } catch (JSONException e) {
+            Log.e(TAG, "Failed to serialize key event", e);
+        }
         return super.onKeyDown(keyCode, event);
-    }
-
-    SkyEngine getEngine() {
-        return mSkyEngine;
     }
 
     public void addActivityLifecycleListener(ActivityLifecycleListener listener) {
@@ -192,26 +188,52 @@ public class FlutterView extends SurfaceView
     }
 
     public void onPause() {
-        mSkyEngine.onAppLifecycleStateChanged(AppLifecycleState.PAUSED);
+        sendPlatformMessage("flutter/lifecycle", "AppLifecycleState.paused", null);
     }
 
     public void onPostResume() {
         for (ActivityLifecycleListener listener : mActivityLifecycleListeners)
             listener.onPostResume();
 
-        mSkyEngine.onAppLifecycleStateChanged(AppLifecycleState.RESUMED);
+        sendPlatformMessage("flutter/lifecycle", "AppLifecycleState.resumed", null);
     }
 
     public void pushRoute(String route) {
-        mSkyEngine.pushRoute(route);
+        try {
+            final JSONArray args = new JSONArray();
+            args.put(0, route);
+            final JSONObject message = new JSONObject();
+            message.put("method", "pushRoute");
+            message.put("args", args);
+            sendPlatformMessage("flutter/navigation", message.toString(), null);
+        } catch (JSONException e) {
+            Log.e(TAG, "Unexpected JSONException pushing route", e);
+        }
     }
 
     public void popRoute() {
-        mSkyEngine.popRoute();
+        try {
+            final JSONObject message = new JSONObject();
+            message.put("method", "popRoute");
+            message.put("args", new JSONArray());
+            sendPlatformMessage("flutter/navigation", message.toString(), null);
+        } catch (JSONException e) {
+            Log.e(TAG, "Unexpected JSONException pushing route", e);
+        }
     }
 
     private void setLocale(Locale locale) {
-        mSkyEngine.onLocaleChanged(locale.getLanguage(), locale.getCountry());
+        try {
+            final JSONArray args = new JSONArray();
+            args.put(0, locale.getLanguage());
+            args.put(1, locale.getCountry());
+            final JSONObject message = new JSONObject();
+            message.put("method", "setLocale");
+            message.put("args", args);
+            sendPlatformMessage("flutter/localization", message.toString(), null);
+        } catch (JSONException e) {
+            Log.e(TAG, "Unexpected JSONException pushing route", e);
+        }
     }
 
     @Override
@@ -229,37 +251,24 @@ public class FlutterView extends SurfaceView
             getContext().unregisterReceiver(discoveryReceiver);
         }
 
-        if (mPlatformServiceProviderBinding != null) {
-            mPlatformServiceProviderBinding.unbind().close();
-            mPlatformServiceProvider.unbindServices();
-        }
-
-        if (mViewServiceProviderBinding != null) {
-            mViewServiceProviderBinding.unbind().close();
-            mViewServiceProvider.unbindServices();
-        }
-
         getHolder().removeCallback(mSurfaceCallback);
         nativeDetach(mNativePlatformView);
         mNativePlatformView = 0;
-
-        mSkyEngine.close();
-        mDartServiceProvider.close();
-        mFlutterAppMessages.close();
     }
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-        return mKeyboardState.createInputConnection(outAttrs);
+        return mTextInputPlugin.createInputConnection(this, outAttrs);
     }
 
     // Must match the PointerChange enum in pointer.dart.
-    private static final int kPointerChangeAdd = 0;
-    private static final int kPointerChangeRemove = 1;
-    private static final int kPointerChangeDown = 2;
-    private static final int kPointerChangeMove = 3;
-    private static final int kPointerChangeUp = 4;
-    private static final int kPointerChangeCancel = 5;
+    private static final int kPointerChangeCancel = 0;
+    private static final int kPointerChangeAdd = 1;
+    private static final int kPointerChangeRemove = 2;
+    private static final int kPointerChangeHover = 3;
+    private static final int kPointerChangeDown = 4;
+    private static final int kPointerChangeMove = 5;
+    private static final int kPointerChangeUp = 6;
 
     // Must match the PointerDeviceKind enum in pointer.dart.
     private static final int kPointerDeviceKindTouch = 0;
@@ -321,9 +330,9 @@ public class FlutterView extends SurfaceView
         long timeStamp = event.getEventTime() * 1000; // Convert from milliseconds to microseconds.
 
         packet.putLong(timeStamp); // time_stamp
-        packet.putLong(event.getPointerId(pointerIndex)); // pointer
         packet.putLong(pointerChange); // change
         packet.putLong(pointerKind); // kind
+        packet.putLong(event.getPointerId(pointerIndex)); // device
         packet.putDouble(event.getX(pointerIndex)); // physical_x
         packet.putDouble(event.getY(pointerIndex)); // physical_y
 
@@ -422,7 +431,7 @@ public class FlutterView extends SurfaceView
     protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
         mMetrics.physicalWidth = width;
         mMetrics.physicalHeight = height;
-        mSkyEngine.onViewportMetricsChanged(mMetrics);
+        updateViewportMetrics();
         super.onSizeChanged(width, height, oldWidth, oldHeight);
     }
 
@@ -432,116 +441,34 @@ public class FlutterView extends SurfaceView
         mMetrics.physicalPaddingRight = insets.getSystemWindowInsetRight();
         mMetrics.physicalPaddingBottom = insets.getSystemWindowInsetBottom();
         mMetrics.physicalPaddingLeft = insets.getSystemWindowInsetLeft();
-        mSkyEngine.onViewportMetricsChanged(mMetrics);
+        updateViewportMetrics();
         return super.onApplyWindowInsets(insets);
     }
 
-    private void configureLocalServices(ServiceRegistry registry) {
-        registry.register(Keyboard.MANAGER.getName(), new ServiceFactory() {
-            @Override
-            public Binding connectToService(FlutterView view, Core core, MessagePipeHandle pipe) {
-                return Keyboard.MANAGER.bind(new KeyboardImpl(view.getContext(), mKeyboardState), pipe);
-            }
-        });
-
-        registry.register(RawKeyboardService.MANAGER.getName(), new ServiceFactory() {
-            @Override
-            public Binding connectToService(FlutterView view, Core core, MessagePipeHandle pipe) {
-                return RawKeyboardService.MANAGER.bind(new RawKeyboardServiceImpl(mRawKeyboardState), pipe);
-            }
-        });
-
-        registry.register(ApplicationMessages.MANAGER.getName(), new ServiceFactory() {
-            @Override
-            public Binding connectToService(FlutterView view, Core core, MessagePipeHandle pipe) {
-                return ApplicationMessages.MANAGER.bind(new ApplicationMessagesImpl(), pipe);
-            }
-        });
-    }
-
     private void attach() {
-        Core core = CoreImpl.getInstance();
-        Pair<SkyEngine.Proxy, InterfaceRequest<SkyEngine>> engine =
-                SkyEngine.MANAGER.getInterfaceRequest(core);
-        mSkyEngine = engine.first;
-        mNativePlatformView =
-            nativeAttach(engine.second.passHandle().releaseNativeHandle(), this);
+        mNativePlatformView = nativeAttach(this);
     }
 
     private void preRun() {
-        if (mPlatformServiceProviderBinding != null) {
-            mPlatformServiceProviderBinding.unbind().close();
-            mPlatformServiceProvider.unbindServices();
-        }
-        if (mViewServiceProviderBinding != null) {
-            mViewServiceProviderBinding.unbind().close();
-            mViewServiceProvider.unbindServices();
-        }
-        if (mDartServiceProvider != null) {
-            mDartServiceProvider.close();
-        }
-
-        Core core = CoreImpl.getInstance();
-
-        Pair<ServiceProvider.Proxy, InterfaceRequest<ServiceProvider>> dartServiceProvider =
-                ServiceProvider.MANAGER.getInterfaceRequest(core);
-        mDartServiceProvider = dartServiceProvider.first;
-
-        Pair<ServiceProvider.Proxy, InterfaceRequest<ServiceProvider>> platformServiceProvider =
-                ServiceProvider.MANAGER.getInterfaceRequest(core);
-        mPlatformServiceProviderBinding = ServiceProvider.MANAGER.bind(
-                mPlatformServiceProvider, platformServiceProvider.second);
-
-        Pair<ServiceProvider.Proxy, InterfaceRequest<ServiceProvider>> viewServiceProvider =
-                ServiceProvider.MANAGER.getInterfaceRequest(core);
-        mViewServiceProviderBinding = ServiceProvider.MANAGER.bind(
-                mViewServiceProvider, viewServiceProvider.second);
-
-        ServicesData services = new ServicesData();
-        services.incomingServices = platformServiceProvider.first;
-        services.outgoingServices = dartServiceProvider.second;
-        services.viewServices = viewServiceProvider.first;
-        mSkyEngine.setServices(services);
-
         resetAccessibilityTree();
     }
 
     private void postRun() {
-        Core core = CoreImpl.getInstance();
-        // Connect to the ApplicationMessages service exported by the Flutter framework
-        Pair<ApplicationMessages.Proxy, InterfaceRequest<ApplicationMessages>> appMessages =
-                  ApplicationMessages.MANAGER.getInterfaceRequest(core);
-        mDartServiceProvider.connectToService(ApplicationMessages.MANAGER.getName(),
-                                              appMessages.second.passHandle());
-        mFlutterAppMessages = appMessages.first;
     }
 
-    public void runFromBundle(String bundlePath, String snapshotPath) {
+    public void runFromBundle(String bundlePath, String snapshotOverride) {
         preRun();
-
-        if (FlutterMain.isRunningPrecompiledCode()) {
-            mSkyEngine.runFromPrecompiledSnapshot(bundlePath);
-        } else {
-            String scriptUri = "file://" + bundlePath;
-            if (snapshotPath != null) {
-                mSkyEngine.runFromBundleAndSnapshot(scriptUri, bundlePath, snapshotPath);
-            } else {
-                mSkyEngine.runFromBundle(scriptUri, bundlePath);
-            }
-        }
-
+        nativeRunBundleAndSnapshot(mNativePlatformView, bundlePath, snapshotOverride);
         postRun();
     }
 
-    public void runFromSource(final String main,
-                              final String packages,
-                              final String assetsDirectory) {
+    private void runFromSource(final String assetsDirectory,
+                               final String main,
+                               final String packages) {
         Runnable runnable = new Runnable() {
             public void run() {
                 preRun();
-                mSkyEngine.runFromFile(main,
-                                       packages,
-                                       assetsDirectory);
+                nativeRunBundleAndSource(mNativePlatformView, assetsDirectory, main, packages);
                 postRun();
                 synchronized (this) {
                     notify();
@@ -566,9 +493,8 @@ public class FlutterView extends SurfaceView
         return nativeGetBitmap(mNativePlatformView);
     }
 
-    private static native long nativeAttach(int skyEngineHandle,
-                                            FlutterView view);
-    private static native int nativeGetObservatoryPort();
+    private static native long nativeAttach(FlutterView view);
+    private static native String nativeGetObservatoryUri();
     private static native void nativeDetach(long nativePlatformViewAndroid);
     private static native void nativeSurfaceCreated(long nativePlatformViewAndroid,
                                                     Surface surface,
@@ -577,33 +503,94 @@ public class FlutterView extends SurfaceView
                                                     int width,
                                                     int height);
     private static native void nativeSurfaceDestroyed(long nativePlatformViewAndroid);
+
+    private static native void nativeRunBundleAndSnapshot(long nativePlatformViewAndroid,
+                                                          String bundlePath,
+                                                          String snapshotOverride);
+    private static native void nativeRunBundleAndSource(long nativePlatformViewAndroid,
+                                                        String bundlePath,
+                                                        String main,
+                                                        String packages);
+
+    private static native void nativeSetViewportMetrics(long nativePlatformViewAndroid, 
+                                                        float devicePixelRatio,
+                                                        int physicalWidth,
+                                                        int physicalHeight,
+                                                        int physicalPaddingTop,
+                                                        int physicalPaddingRight,
+                                                        int physicalPaddingBottom,
+                                                        int physicalPaddingLeft);
     private static native Bitmap nativeGetBitmap(long nativePlatformViewAndroid);
 
+    // Send a platform message to Dart.
+    private static native void nativeDispatchPlatformMessage(long nativePlatformViewAndroid, String channel, String message, int responseId);
     private static native void nativeDispatchPointerDataPacket(long nativePlatformViewAndroid, ByteBuffer buffer, int position);
     private static native void nativeDispatchSemanticsAction(long nativePlatformViewAndroid, int id, int action);
     private static native void nativeSetSemanticsEnabled(long nativePlatformViewAndroid, boolean enabled);
-    private static native void nativeInvokePlatformMessageResponseCallback(long nativePlatformViewAndroid, int responseId, String buffer);
 
+    // Send a response to a platform message received from Dart.
+    private static native void nativeInvokePlatformMessageResponseCallback(long nativePlatformViewAndroid, int responseId, String message);
+
+    private void updateViewportMetrics() {
+        nativeSetViewportMetrics(mNativePlatformView,
+                                 mMetrics.devicePixelRatio,
+                                 mMetrics.physicalWidth,
+                                 mMetrics.physicalHeight,
+                                 mMetrics.physicalPaddingTop,
+                                 mMetrics.physicalPaddingRight,
+                                 mMetrics.physicalPaddingBottom,
+                                 mMetrics.physicalPaddingLeft);
+    }
+
+    // Called by native to send us a platform message.
     @CalledByNative
-    private void handlePlatformMessage(String messageName, String message, final int responseId) {
-        OnMessageListener listener = mOnMessageListeners.get(messageName);
+    private void handlePlatformMessage(String channel, String message, final int responseId) {
+        OnMessageListener listener = mOnMessageListeners.get(channel);
         if (listener != null) {
-            nativeInvokePlatformMessageResponseCallback(mNativePlatformView, responseId, listener.onMessage(this, message));
+            String response = null;
+            try {
+                response = listener.onMessage(this, message);
+            } catch (Exception ex) {
+                Log.e(TAG, "Uncaught exception in message listener", ex);
+            }
+            nativeInvokePlatformMessageResponseCallback(mNativePlatformView, responseId, response);
             return;
         }
 
-        OnMessageListenerAsync asyncListener = mAsyncOnMessageListeners.get(messageName);
+        OnMessageListenerAsync asyncListener = mAsyncOnMessageListeners.get(channel);
         if (asyncListener != null) {
-            asyncListener.onMessage(this, message, new MessageResponse() {
-              @Override
-              public void send(String response) {
-                  nativeInvokePlatformMessageResponseCallback(mNativePlatformView, responseId, response);
-              }
-            });
+            try {
+                asyncListener.onMessage(this, message, new MessageResponse() {
+                    @Override
+                    public void send(String response) {
+                        nativeInvokePlatformMessageResponseCallback(mNativePlatformView, responseId, response);
+                    }
+                });
+            } catch (Exception ex) {
+                Log.e(TAG, "Uncaught exception in async message listener", ex);
+                nativeInvokePlatformMessageResponseCallback(mNativePlatformView, responseId, null);
+            }
             return;
         }
 
         nativeInvokePlatformMessageResponseCallback(mNativePlatformView, responseId, null);
+    }
+
+    private int mNextResponseId = 1;
+    private final Map<Integer, MessageReplyCallback> mPendingResponses = new HashMap<Integer, MessageReplyCallback>();
+
+    // Called by native to respond to a platform message that we sent.
+    @CalledByNative
+    private void handlePlatformMessageResponse(int responseId, String response) {
+        MessageReplyCallback callback = mPendingResponses.remove(responseId);
+        if (callback != null) {
+            try {
+                callback.onReply(response);
+            } catch (Exception ex) {
+                Log.e(TAG, "Uncaught exception in message listener reply", ex);
+                return;
+            }
+        }
     }
 
     @CalledByNative
@@ -618,6 +605,7 @@ public class FlutterView extends SurfaceView
 
     private boolean mAccessibilityEnabled = false;
     private boolean mTouchExplorationEnabled = false;
+    private TouchExplorationListener mTouchExplorationListener;
 
     protected void dispatchSemanticsAction(int id, int action) {
         nativeDispatchSemanticsAction(mNativePlatformView, id, action);
@@ -632,14 +620,19 @@ public class FlutterView extends SurfaceView
           ensureAccessibilityEnabled();
         resetWillNotDraw();
         mAccessibilityManager.addAccessibilityStateChangeListener(this);
-        mAccessibilityManager.addTouchExplorationStateChangeListener(this);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            if (mTouchExplorationListener == null)
+                mTouchExplorationListener = new TouchExplorationListener();
+            mAccessibilityManager.addTouchExplorationStateChangeListener(mTouchExplorationListener);
+        }
     }
 
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
         mAccessibilityManager.removeAccessibilityStateChangeListener(this);
-        mAccessibilityManager.removeTouchExplorationStateChangeListener(this);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT)
+            mAccessibilityManager.removeTouchExplorationStateChangeListener(mTouchExplorationListener);
     }
 
     private void resetWillNotDraw() {
@@ -660,18 +653,21 @@ public class FlutterView extends SurfaceView
         resetWillNotDraw();
     }
 
-    @Override
-    public void onTouchExplorationStateChanged(boolean enabled) {
-        if (enabled) {
-            mTouchExplorationEnabled = true;
-            ensureAccessibilityEnabled();
-        } else {
-            mTouchExplorationEnabled = false;
-            if (mAccessibilityNodeProvider != null) {
-                mAccessibilityNodeProvider.handleTouchExplorationExit();
+    class TouchExplorationListener
+      implements AccessibilityManager.TouchExplorationStateChangeListener {
+        @Override
+        public void onTouchExplorationStateChanged(boolean enabled) {
+            if (enabled) {
+                mTouchExplorationEnabled = true;
+                ensureAccessibilityEnabled();
+            } else {
+                mTouchExplorationEnabled = false;
+                if (mAccessibilityNodeProvider != null) {
+                    mAccessibilityNodeProvider.handleTouchExplorationExit();
+                }
             }
+            resetWillNotDraw();
         }
-        resetWillNotDraw();
     }
 
     @Override
@@ -711,24 +707,29 @@ public class FlutterView extends SurfaceView
     }
 
     /**
+     * Send a message to the Flutter application. The Flutter application can
+     * register a platform message handler that will receive these messages with
+     * the PlatformMessages object.
+     */
+    public void sendPlatformMessage(String channel, String message, MessageReplyCallback callback) {
+        int responseId = 0;
+        if (callback != null) {
+            responseId = mNextResponseId++;
+            mPendingResponses.put(responseId, callback);
+        }
+        nativeDispatchPlatformMessage(mNativePlatformView, channel, message, responseId);
+    }
+
+    /**
      * Send a message to the Flutter application.  The Flutter Dart code can register a
      * host message handler that will receive these messages.
      */
-    public void sendToFlutter(String messageName, String message,
-                              final MessageReplyCallback callback) {
-        mFlutterAppMessages.sendString(messageName, message,
-            new ApplicationMessages.SendStringResponse() {
-                @Override
-                public void call(String reply) {
-                    if (callback != null) {
-                        callback.onReply(reply);
-                    }
-                }
-            });
+    public void sendToFlutter(String channel, String message, MessageReplyCallback callback) {
+        sendPlatformMessage(channel, message, callback);
     }
 
-    public void sendToFlutter(String messageName, String message) {
-        sendToFlutter(messageName, message, null);
+    public void sendToFlutter(String channel, String message) {
+        sendToFlutter(channel, message, null);
     }
 
     /** Callback invoked when the app replies to a message sent with sendToFlutter. */
@@ -740,16 +741,16 @@ public class FlutterView extends SurfaceView
      * Register a callback to be invoked when the Flutter application sends a message
      * to its host.
      */
-    public void addOnMessageListener(String messageName, OnMessageListener listener) {
-        mOnMessageListeners.put(messageName, listener);
+    public void addOnMessageListener(String channel, OnMessageListener listener) {
+        mOnMessageListeners.put(channel, listener);
     }
 
     /**
      * Register a callback to be invoked when the Flutter application sends a message
      * to its host.  The reply to the message can be provided asynchronously.
      */
-    public void addOnMessageListenerAsync(String messageName, OnMessageListenerAsync listener) {
-        mAsyncOnMessageListeners.put(messageName, listener);
+    public void addOnMessageListenerAsync(String channel, OnMessageListenerAsync listener) {
+        mAsyncOnMessageListeners.put(channel, listener);
     }
 
     public interface OnMessageListener {
@@ -772,56 +773,15 @@ public class FlutterView extends SurfaceView
         void send(String reply);
     }
 
-    private class ApplicationMessagesImpl implements ApplicationMessages {
-        @Override
-        public void close() {}
-
-        @Override
-        public void onConnectionError(MojoException e) {}
-
-        @Override
-        public void sendString(String messageName, String message, SendStringResponse callback) {
-            OnMessageListener listener = mOnMessageListeners.get(messageName);
-            if (listener != null) {
-                callback.call(listener.onMessage(FlutterView.this, message));
-                return;
-            }
-
-            OnMessageListenerAsync asyncListener = mAsyncOnMessageListeners.get(messageName);
-            if (asyncListener != null) {
-                asyncListener.onMessage(FlutterView.this, message, new MessageResponseAdapter(callback));
-                return;
-            }
-
-            callback.call(null);
-        }
-    }
-
-    /**
-     * This class wraps the raw Mojo callback object in an interface that is owned
-     * by Flutter and can be safely given to host apps.
-     */
-    private static class MessageResponseAdapter implements MessageResponse {
-        private ApplicationMessages.SendStringResponse callback;
-
-        MessageResponseAdapter(ApplicationMessages.SendStringResponse callback) {
-            this.callback = callback;
-        }
-
-        @Override
-        public void send(String reply) {
-            callback.call(reply);
-        }
-    }
-
     /** Broadcast receiver used to discover active Flutter instances. */
     private class DiscoveryReceiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
+            URI observatoryUri = URI.create(nativeGetObservatoryUri());
             JSONObject discover = new JSONObject();
             try {
                 discover.put("id", getContext().getPackageName());
-                discover.put("observatoryPort", nativeGetObservatoryPort());
+                discover.put("observatoryPort", observatoryUri.getPort());
                 Log.i(TAG, "DISCOVER: " + discover);
             } catch (JSONException e) {}
         }

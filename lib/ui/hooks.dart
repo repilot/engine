@@ -4,6 +4,14 @@
 
 part of dart_ui;
 
+String _decodeUTF8(ByteData message) {
+  return message != null ? UTF8.decoder.convert(message.buffer.asUint8List()) : null;
+}
+
+dynamic _decodeJSON(String message) {
+  return message != null ? JSON.decode(message) : null;
+}
+
 void _updateWindowMetrics(double devicePixelRatio,
                           double width,
                           double height,
@@ -32,16 +40,32 @@ void _updateSemanticsEnabled(bool enabled) {
     window.onSemanticsEnabledChanged();
 }
 
-void _pushRoute(String route) {
-  assert(window._defaultRouteName == null);
-  window._defaultRouteName = route;
-  // TODO(abarth): If we ever start calling _pushRoute other than before main,
-  // we should add a change notification callback.
+void _handleNavigationMessage(ByteData data) {
+  if (window._defaultRouteName != null)
+    return;
+  try {
+    final dynamic message = _decodeJSON(_decodeUTF8(data));
+    final dynamic method = message['method'];
+    if (method != 'pushRoute')
+      return;
+    final dynamic args = message['args'];
+    window._defaultRouteName = args[0];
+  } catch (e) {
+    // We ignore any exception and just let the message be dispatched as usual.
+  }
 }
 
-void _popRoute() {
-  if (window.onPopRoute != null)
-    window.onPopRoute();
+void _dispatchPlatformMessage(String name, ByteData data, int responseId) {
+  if (name == 'flutter/navigation')
+    _handleNavigationMessage(data);
+
+  if (window.onPlatformMessage != null) {
+    window.onPlatformMessage(name, data, (ByteData responseData) {
+      window._respondToPlatformMessage(responseId, responseData);
+    });
+  } else {
+    window._respondToPlatformMessage(responseId, null);
+  }
 }
 
 void _dispatchPointerDataPacket(ByteData packet) {
@@ -59,11 +83,6 @@ void _beginFrame(int microseconds) {
     window.onBeginFrame(new Duration(microseconds: microseconds));
 }
 
-void _onAppLifecycleStateChanged(int state) {
-  if (window.onAppLifecycleStateChanged != null)
-    window.onAppLifecycleStateChanged(AppLifecycleState.values[state]);
-}
-
 // If this value changes, update the encoding code in the following files:
 //
 //  * pointer_data.cc
@@ -75,14 +94,14 @@ PointerDataPacket _unpackPointerDataPacket(ByteData packet) {
   const int kBytesPerPointerData = _kPointerDataFieldCount * kStride;
   final int length = packet.lengthInBytes ~/ kBytesPerPointerData;
   assert(length * kBytesPerPointerData == packet.lengthInBytes);
-  List<PointerData> pointers = new List<PointerData>(length);
+  List<PointerData> data = new List<PointerData>(length);
   for (int i = 0; i < length; ++i) {
     int offset = i * _kPointerDataFieldCount;
-    pointers[i] = new PointerData(
+    data[i] = new PointerData(
       timeStamp: new Duration(microseconds: packet.getInt64(kStride * offset++, _kFakeHostEndian)),
-      pointer: packet.getInt64(kStride * offset++, _kFakeHostEndian),
       change: PointerChange.values[packet.getInt64(kStride * offset++, _kFakeHostEndian)],
       kind: PointerDeviceKind.values[packet.getInt64(kStride * offset++, _kFakeHostEndian)],
+      device: packet.getInt64(kStride * offset++, _kFakeHostEndian),
       physicalX: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
       physicalY: packet.getFloat64(kStride * offset++, _kFakeHostEndian),
       buttons: packet.getInt64(kStride * offset++, _kFakeHostEndian),
@@ -101,5 +120,5 @@ PointerDataPacket _unpackPointerDataPacket(ByteData packet) {
     );
     assert(offset == (i + 1) * _kPointerDataFieldCount);
   }
-  return new PointerDataPacket(pointers: pointers);
+  return new PointerDataPacket(data: data);
 }

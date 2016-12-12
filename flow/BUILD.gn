@@ -4,6 +4,8 @@
 
 source_set("flow") {
   sources = [
+    "bitmap_image.cc",
+    "bitmap_image.h",
     "compositor_context.cc",
     "compositor_context.h",
     "instrumentation.cc",
@@ -36,16 +38,18 @@ source_set("flow") {
     "layers/transform_layer.h",
     "raster_cache.cc",
     "raster_cache.h",
-    "bitmap_image.cc",
-    "bitmap_image.h",
+    "scene_update_context.cc",
+    "scene_update_context.h",
     "texture_image.h",
   ]
 
   deps = [
+    "//flutter/common",
     "//flutter/glue",
-    "//flutter/skia",
     "//flutter/synchronization",
     "//lib/ftl",
+    "//third_party/skia",
+    "//third_party/skia:gpu",
   ]
 
   if (is_fuchsia) {
@@ -54,8 +58,9 @@ source_set("flow") {
       "layers/child_scene_layer.h",
       "texture_image_none.cc",
     ]
-    deps += [
-      "//apps/mozart/services/composition/interfaces",
+    public_deps = [
+      "//apps/mozart/lib/skia",
+      "//apps/mozart/services/composition",
     ]
   } else {
     sources += [

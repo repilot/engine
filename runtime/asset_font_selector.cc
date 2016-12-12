@@ -186,7 +186,7 @@ PassRefPtr<FontData> AssetFontSelector::getFontData(
                                    font_description.orientation(),
                                    font_description.useSubpixelPositioning());
 
-    font_data = SimpleFontData::create(platform_data);
+    font_data = SimpleFontData::create(platform_data, CustomFontData::create());
     font_platform_data_cache_.set(key, font_data);
   }
 
@@ -225,7 +225,7 @@ sk_sp<SkTypeface> AssetFontSelector::getTypefaceAsset(
     return nullptr;
   }
 
-  SkAutoTUnref<SkFontMgr> font_mgr(SkFontMgr::RefDefault());
+  sk_sp<SkFontMgr> font_mgr(SkFontMgr::RefDefault());
   SkMemoryStream* typeface_stream = new SkMemoryStream(
       typeface_asset->data.data(), typeface_asset->data.size());
   typeface_asset->typeface =

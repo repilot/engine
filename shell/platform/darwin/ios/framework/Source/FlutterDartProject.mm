@@ -6,8 +6,9 @@
 
 #include "base/command_line.h"
 #include "dart/runtime/include/dart_api.h"
-#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterDartSource.h"
+#include "flutter/common/threads.h"
 #include "flutter/shell/common/switches.h"
+#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterDartSource.h"
 
 static NSURL* URLForSwitch(const char* name) {
   auto cmd = *base::CommandLine::ForCurrentProcess();
@@ -91,18 +92,27 @@ static NSURL* URLForSwitch(const char* name) {
     // Load directly from sources if the appropriate command line flags are
     // specified. If not, try loading from a script snapshot in the framework
     // bundle.
-    NSURL* flxURL = URLForSwitch(shell::switches::kFLX);
+    NSURL* flxURL = URLForSwitch(shell::FlagForSwitch(shell::Switch::FLX));
 
     if (flxURL == nil) {
       // If the URL was not specified on the command line, look inside the
       // FlutterApplication bundle.
-      flxURL =
-          [NSURL fileURLWithPath:[bundle pathForResource:@"app" ofType:@"flx"]
-                     isDirectory:NO];
+      NSString* flxPath = [self pathForFLXFromBundle:bundle];
+      if (flxPath != nil) {
+        flxURL = [NSURL fileURLWithPath:flxPath isDirectory:NO];
+      }
     }
 
-    NSURL* dartMainURL = URLForSwitch(shell::switches::kMainDartFile);
-    NSURL* dartPackagesURL = URLForSwitch(shell::switches::kPackages);
+    if (flxURL == nil) {
+      NSLog(@"Error: FLX file not present in bundle; unable to start app.");
+      [self release];
+      return nil;
+    }
+
+    NSURL* dartMainURL =
+        URLForSwitch(shell::FlagForSwitch(shell::Switch::MainDartFile));
+    NSURL* dartPackagesURL =
+        URLForSwitch(shell::FlagForSwitch(shell::Switch::Packages));
 
     return [self initWithFLXArchive:flxURL
                            dartMain:dartMainURL
@@ -128,6 +138,16 @@ static NSURL* URLForSwitch(const char* name) {
   }
 }
 
+- (NSString*)pathForFLXFromBundle:(NSBundle*)bundle {
+  NSString* flxName = [bundle objectForInfoDictionaryKey:@"FLTFlxName"];
+  if (flxName == nil) {
+    // Default to "app.flx"
+    flxName = @"app";
+  }
+
+  return [bundle pathForResource:flxName ofType:@"flx"];
+}
+
 #pragma mark - Launching the project in a preconfigured engine.
 
 static NSString* NSStringFromVMType(VMType type) {
@@ -143,7 +163,7 @@ static NSString* NSStringFromVMType(VMType type) {
   return @"Unknown";
 }
 
-- (void)launchInEngine:(sky::SkyEnginePtr&)engine
+- (void)launchInEngine:(shell::Engine*)engine
         embedderVMType:(VMType)embedderVMType
                 result:(LaunchResult)result {
   if (_vmTypeRequirement == VMTypeInvalid) {
@@ -184,7 +204,7 @@ static NSString* NSStringFromVMType(VMType type) {
 
 #pragma mark - Running from precompiled application bundles
 
-- (void)runFromPrecompiledSourceInEngine:(sky::SkyEnginePtr&)engine
+- (void)runFromPrecompiledSourceInEngine:(shell::Engine*)engine
                                   result:(LaunchResult)result {
   if (![_precompiledDartBundle load]) {
     NSString* message = [NSString
@@ -195,9 +215,7 @@ static NSString* NSStringFromVMType(VMType type) {
     return;
   }
 
-  NSString* path =
-      [_precompiledDartBundle pathForResource:@"app" ofType:@"flx"];
-
+  NSString* path = [self pathForFLXFromBundle:_precompiledDartBundle];
   if (path.length == 0) {
     NSString* message =
         [NSString stringWithFormat:@"Could not find the 'app.flx' archive in "
@@ -207,13 +225,19 @@ static NSString* NSStringFromVMType(VMType type) {
     return;
   }
 
-  engine->RunFromPrecompiledSnapshot(path.UTF8String);
+  std::string bundle_path = path.UTF8String;
+  blink::Threads::UI()->PostTask(
+      [ engine = engine->GetWeakPtr(), bundle_path ] {
+        if (engine)
+          engine->RunBundle(bundle_path);
+      });
+
   result(YES, @"Success");
 }
 
 #pragma mark - Running from source
 
-- (void)runFromSourceInEngine:(sky::SkyEnginePtr&)engine
+- (void)runFromSourceInEngine:(shell::Engine*)engine
                        result:(LaunchResult)result {
   if (_dartSource == nil) {
     result(NO, @"Dart source not specified.");
@@ -225,13 +249,23 @@ static NSString* NSStringFromVMType(VMType type) {
       return result(NO, message);
     }
 
+    std::string bundle_path =
+        _dartSource.flxArchive.absoluteURL.path.UTF8String;
+
     if (_dartSource.archiveContainsScriptSnapshot) {
-      engine->RunFromBundle("file://script_snapshot",
-                            _dartSource.flxArchive.absoluteURL.path.UTF8String);
+      blink::Threads::UI()->PostTask(
+          [ engine = engine->GetWeakPtr(), bundle_path ] {
+            if (engine)
+              engine->RunBundle(bundle_path);
+          });
     } else {
-      engine->RunFromFile(_dartSource.dartMain.absoluteURL.path.UTF8String,
-                          _dartSource.packages.absoluteURL.path.UTF8String,
-                          _dartSource.flxArchive.absoluteURL.path.UTF8String);
+      std::string main = _dartSource.dartMain.absoluteURL.path.UTF8String;
+      std::string packages = _dartSource.packages.absoluteURL.path.UTF8String;
+      blink::Threads::UI()->PostTask(
+          [ engine = engine->GetWeakPtr(), bundle_path, main, packages ] {
+            if (engine)
+              engine->RunBundleAndSource(bundle_path, main, packages);
+          });
     }
 
     result(YES, @"Success");

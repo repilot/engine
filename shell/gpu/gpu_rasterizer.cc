@@ -12,7 +12,6 @@
 #include "flutter/shell/common/picture_serializer.h"
 #include "flutter/shell/common/platform_view.h"
 #include "flutter/shell/common/shell.h"
-#include "mojo/public/cpp/system/data_pipe.h"
 #include "third_party/skia/include/core/SkPicture.h"
 
 namespace shell {
@@ -131,7 +130,7 @@ void GPURasterizer::DrawToSurface(flow::LayerTree& layer_tree) {
   }
 
   auto compositor_frame =
-      compositor_context_.AcquireFrame(surface_->GetContext(), *canvas);
+      compositor_context_.AcquireFrame(surface_->GetContext(), canvas);
 
   canvas->clear(SK_ColorBLACK);
 
@@ -174,7 +173,7 @@ void GPURasterizer::DrawToTraceIfNecessary(flow::LayerTree& layer_tree) {
                           layer_tree.frame_size().height());
 
   auto compositor_frame = compositor_context_.AcquireFrame(
-      nullptr, *recorder.getRecordingCanvas(), false);
+      nullptr, recorder.getRecordingCanvas(), false);
   layer_tree.Raster(compositor_frame, true /* ignore raster cache */);
 
   sk_sp<SkPicture> picture = recorder.finishRecordingAsPicture();

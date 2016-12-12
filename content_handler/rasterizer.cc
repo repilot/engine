@@ -6,24 +6,19 @@
 
 #include <utility>
 
-#include "apps/mozart/services/composition/interfaces/image.mojom.h"
-#include "flutter/content_handler/skia_surface_holder.h"
+#include "apps/mozart/lib/skia/skia_vmo_surface.h"
 #include "lib/ftl/logging.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 
-namespace flutter_content_handler {
-
-namespace {
-constexpr uint32_t kContentImageResourceId = 1;
-constexpr uint32_t kRootNodeId = mozart::kSceneRootNodeId;
-}  // namespace
+namespace flutter_runner {
 
 Rasterizer::Rasterizer() {}
 
 Rasterizer::~Rasterizer() {}
 
-void Rasterizer::SetScene(mojo::InterfaceHandle<mozart::Scene> scene) {
+void Rasterizer::SetScene(fidl::InterfaceHandle<mozart::Scene> scene) {
   scene_.Bind(std::move(scene));
+  buffer_producer_.reset(new mozart::BufferProducer());
 }
 
 void Rasterizer::Draw(std::unique_ptr<flow::LayerTree> layer_tree,
@@ -35,49 +30,50 @@ void Rasterizer::Draw(std::unique_ptr<flow::LayerTree> layer_tree,
   }
 
   const SkISize& frame_size = layer_tree->frame_size();
+
   auto update = mozart::SceneUpdate::New();
+  // TODO(abarth): Support incremental updates.
+  update->clear_resources = true;
+  update->clear_nodes = true;
 
-  if (!frame_size.isEmpty()) {
-    // TODO(jeffbrown): Maintain a pool of images and recycle them.
-    SkiaSurfaceHolder surface_holder(frame_size);
-
-    SkCanvas* canvas = surface_holder.surface()->getCanvas();
-    flow::CompositorContext::ScopedFrame frame =
-        compositor_context_.AcquireFrame(nullptr, *canvas);
-    canvas->clear(SK_ColorBLACK);
-    layer_tree->Raster(frame);
-    canvas->flush();
-
-    mojo::RectF bounds;
-    bounds.width = frame_size.width();
-    bounds.height = frame_size.height();
-
-    auto content_resource = mozart::Resource::New();
-    content_resource->set_image(mozart::ImageResource::New());
-    content_resource->get_image()->image = surface_holder.TakeImage();
-    update->resources.insert(kContentImageResourceId, content_resource.Pass());
-
-    auto root_node = mozart::Node::New();
-    root_node->hit_test_behavior = mozart::HitTestBehavior::New();
-    root_node->op = mozart::NodeOp::New();
-    root_node->op->set_image(mozart::ImageNodeOp::New());
-    root_node->op->get_image()->content_rect = bounds.Clone();
-    root_node->op->get_image()->image_resource_id = kContentImageResourceId;
-    update->nodes.insert(kRootNodeId, root_node.Pass());
-
-    layer_tree->UpdateScene(update.get(), root_node.get());
-  } else {
-    auto root_node = mozart::Node::New();
-    update->nodes.insert(kRootNodeId, root_node.Pass());
+  if (frame_size.isEmpty()) {
+    update->nodes.insert(mozart::kSceneRootNodeId, mozart::Node::New());
+    // Publish the updated scene contents.
+    // TODO(jeffbrown): We should set the metadata's presentation_time here too.
+    scene_->Update(std::move(update));
+    auto metadata = mozart::SceneMetadata::New();
+    metadata->version = layer_tree->scene_version();
+    scene_->Publish(std::move(metadata));
+    callback();
+    return;
   }
 
-  scene_->Update(std::move(update));
+  flow::CompositorContext::ScopedFrame frame =
+      compositor_context_.AcquireFrame(nullptr, nullptr);
 
+  layer_tree->Preroll(frame);
+
+  flow::SceneUpdateContext context(update.get(), buffer_producer_.get());
+  auto root_node = mozart::Node::New();
+  root_node->hit_test_behavior = mozart::HitTestBehavior::New();
+  layer_tree->UpdateScene(context, root_node.get());
+  update->nodes.insert(mozart::kSceneRootNodeId, std::move(root_node));
+
+  // Publish the updated scene contents.
+  // TODO(jeffbrown): We should set the metadata's presentation_time here too.
+  scene_->Update(std::move(update));
   auto metadata = mozart::SceneMetadata::New();
   metadata->version = layer_tree->scene_version();
   scene_->Publish(std::move(metadata));
 
+  // Draw the contents of the scene to a surface.
+  // We do this after publishing to take advantage of pipelining.
+  // The image buffer's fence is signalled automatically when the surface
+  // goes out of scope.
+  context.ExecutePaintTasks(frame);
+  buffer_producer_->Tick();
+
   callback();
 }
 
-}  // namespace flutter_content_handler
+}  // namespace flutter_runner

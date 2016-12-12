@@ -12,7 +12,7 @@ Things you will need
  * An ssh client (used to authenticate with GitHub).
  * Chromium's [depot_tools](http://www.chromium.org/developers/how-tos/install-depot-tools) (make sure it's in your path). We use the `gclient` tool from depot_tools.
  * Python (used by many of our tools, including 'gclient').
- * curl (used by `gclient sync`).
+ * curl and unzip (used by `gclient sync`).
 
 You do not need [Dart](https://www.dartlang.org/downloads/linux.html) installed, as a Dart tool chain is automatically downloaded as part of the "getting the code" step. Similarly for the Android SDK, it's downloaded by the `gclient sync` step below.
 
@@ -52,6 +52,12 @@ target_os = ["android"]
  * If you're on Linux, run `sudo ./build/install-build-deps.sh`
  * If you're on Mac, install Oracle's Java JDK, version 1.7 or later.
  * If you're on Mac, install `ant`: `brew install ant`
+ * If you're planning on working on the [buildroot](https://github.com/flutter/buildroot) repository as well, and have a local checkout of that repository, run the following commands in the `src` directory to update your git remotes accordingly:
+ 
+ ```bash
+ git remote rename origin upstream
+ git remote add origin git@github.com:<your_name_here>/buildroot.git
+  ```
 
 Building and running the code
 -----------------------------
@@ -160,7 +166,7 @@ flutter/tools/gn --android --runtime-mode=profile
 flutter/tools/gn --android --runtime-mode=release
 
 cd out
-ls | xargs -n 1 sh -c 'ninja -C $0 || exit 255'
+find . -mindepth 1 -maxdepth 1 -type d | xargs -n 1 sh -c 'ninja -C $0 || exit 255'
 
 flutter update-packages --upgrade
 ```

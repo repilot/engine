@@ -3,10 +3,11 @@
 // found in the LICENSE file.
 
 #include "flutter/shell/platform/linux/platform_view_glfw.h"
+
 #include <GLFW/glfw3.h>
+
 #include "flutter/common/threads.h"
 #include "flutter/shell/gpu/gpu_rasterizer.h"
-#include "flutter/shell/platform/linux/glfw_service_provider.h"
 
 namespace shell {
 
@@ -19,6 +20,8 @@ PlatformViewGLFW::PlatformViewGLFW()
       valid_(false),
       glfw_window_(nullptr),
       buttons_(0) {
+  CreateEngine();
+
   if (!glfwInit()) {
     return;
   }
@@ -58,21 +61,6 @@ PlatformViewGLFW::~PlatformViewGLFW() {
   glfwTerminate();
 }
 
-void PlatformViewGLFW::ConnectToEngineAndSetupServices() {
-  ConnectToEngine(mojo::GetProxy(&engine_));
-
-  mojo::ServiceProviderPtr platform_service_provider;
-  new GLFWServiceProvider(mojo::GetProxy(&platform_service_provider));
-
-  sky::ServicesDataPtr services = sky::ServicesData::New();
-  services->incoming_services = platform_service_provider.Pass();
-  engine_->SetServices(services.Pass());
-}
-
-sky::SkyEnginePtr& PlatformViewGLFW::EngineProxy() {
-  return engine_;
-}
-
 bool PlatformViewGLFW::IsValid() const {
   return valid_;
 }
@@ -102,16 +90,19 @@ bool PlatformViewGLFW::GLContextPresent() {
   return true;
 }
 
-void PlatformViewGLFW::RunFromSource(const std::string& main,
-                                     const std::string& packages,
-                                     const std::string& assets_directory) {}
+void PlatformViewGLFW::RunFromSource(const std::string& assets_directory,
+                                     const std::string& main,
+                                     const std::string& packages) {}
 
 void PlatformViewGLFW::OnWindowSizeChanged(int width, int height) {
-  auto metrics = sky::ViewportMetrics::New();
-  metrics->physical_width = width;
-  metrics->physical_height = height;
-  metrics->device_pixel_ratio = 1.0;
-  engine_->OnViewportMetricsChanged(metrics.Pass());
+  blink::ViewportMetrics metrics;
+  metrics.physical_width = width;
+  metrics.physical_height = height;
+
+  blink::Threads::UI()->PostTask([ engine = engine().GetWeakPtr(), metrics ] {
+    if (engine.get())
+      engine->SetViewportMetrics(metrics);
+  });
 }
 
 void PlatformViewGLFW::OnMouseButtonChanged(int button, int action, int mods) {

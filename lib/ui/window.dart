@@ -16,16 +16,17 @@ typedef void PointerDataPacketCallback(PointerDataPacket packet);
 /// Signature for [Window.onSemanticsAction].
 typedef void SemanticsActionCallback(int id, SemanticsAction action);
 
-/// Signature for [Window.onAppLifecycleStateChanged].
-typedef void AppLifecycleStateCallback(AppLifecycleState state);
-
+/// Signature for responses to platform messages.
+///
+/// Used as a parameter to [Window.sendPlatformMessage] and
+/// [Window.onPlatformMessage].
 typedef void PlatformMessageResponseCallback(ByteData data);
+
+/// Signature for [Window.onPlatformMessage].
+typedef void PlatformMessageCallback(String name, ByteData data, PlatformMessageResponseCallback callback);
 
 /// States that an application can be in.
 enum AppLifecycleState {
-  // These values must match the order of the values of
-  // AppLifecycleState in sky_engine.mojom
-
   /// The application is not currently visible to the user. When the
   /// application is in this state, the engine will not call the
   /// [onBeginFrame] callback.
@@ -141,10 +142,6 @@ class Window {
   /// A callback that is invoked whenever [locale] changes value.
   VoidCallback onLocaleChanged;
 
-  /// A callback that is invoked when there is a transition in the application's
-  /// lifecycle (such as pausing or resuming).
-  AppLifecycleStateCallback onAppLifecycleStateChanged;
-
   /// A callback that is invoked to notify the application that it is an
   /// appropriate time to provide a scene using the [SceneBuilder] API and the
   /// [render] method. When possible, this is driven by the hardware VSync
@@ -159,11 +156,6 @@ class Window {
   /// was launched.
   String get defaultRouteName => _defaultRouteName;
   String _defaultRouteName;
-
-  /// A callback that is invoked when the operating system requests that the
-  /// application goes "back" one step in its history. For example, on Android
-  /// this is invoked in response to the "back" button.
-  VoidCallback onPopRoute;
 
   /// Requests that, at the next appropriate opportunity, the [onBeginFrame]
   /// callback be invoked.
@@ -215,15 +207,36 @@ class Window {
   /// semantics update cannot be used further.
   void updateSemantics(SemanticsUpdate update) native "Window_updateSemantics";
 
-  void sendPlatformMesssage(String name,
-                            ByteData data,
-                            PlatformMessageResponseCallback callback) {
-    _sendPlatformMesssage(name, callback, data);
+  /// Sends a message to a platform-specific plugin.
+  ///
+  /// The `name` parameter determines which plugin receives the message. The
+  /// `data` parameter contains the message payload and is typically UTF-8
+  /// encoded JSON but can be arbitrary data. If the plugin replies to the
+  /// message, `callback` will be called with the response.
+  void sendPlatformMessage(String name,
+                           ByteData data,
+                           PlatformMessageResponseCallback callback) {
+    _sendPlatformMessage(name, callback, data);
   }
-  void _sendPlatformMesssage(String name,
-                             PlatformMessageResponseCallback callback,
-                             ByteData data) native "Window_sendPlatformMesssage";
+  void _sendPlatformMessage(String name,
+                            PlatformMessageResponseCallback callback,
+                            ByteData data) native "Window_sendPlatformMessage";
 
+  /// Called whenever this window receives a message from a platform-specific
+  /// plugin.
+  ///
+  /// The `name` parameter determines which plugin sent the message. The `data`
+  /// parameter is the payload and is typically UTF-8 encoded JSON but can be
+  /// arbitrary data.
+  ///
+  /// Message handlers must call the function given in the `callback` parameter.
+  /// If the handler does not need to respond, the handler should pass `null` to
+  /// the callback.
+  PlatformMessageCallback onPlatformMessage;
+
+  /// Called by [_dispatchPlatformMessage].
+  void _respondToPlatformMessage(int responseId, ByteData data)
+      native "Window_respondToPlatformMessage";
 }
 
 /// The [Window] singleton. This object exposes the size of the display, the

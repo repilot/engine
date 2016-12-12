@@ -10,7 +10,9 @@
 namespace shell {
 
 PlatformViewTest::PlatformViewTest()
-    : PlatformView(std::unique_ptr<Rasterizer>(new NullRasterizer())) {}
+    : PlatformView(std::unique_ptr<Rasterizer>(new NullRasterizer())) {
+  CreateEngine();
+}
 
 PlatformViewTest::~PlatformViewTest() = default;
 
@@ -18,8 +20,8 @@ bool PlatformViewTest::ResourceContextMakeCurrent() {
   return false;
 }
 
-void PlatformViewTest::RunFromSource(const std::string& main,
-                                     const std::string& packages,
-                                     const std::string& assets_directory) {}
+void PlatformViewTest::RunFromSource(const std::string& assets_directory,
+                                     const std::string& main,
+                                     const std::string& packages) {}
 
 }  // namespace shell

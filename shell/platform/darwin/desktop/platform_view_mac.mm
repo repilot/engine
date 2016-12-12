@@ -9,11 +9,11 @@
 
 #include "base/command_line.h"
 #include "base/trace_event/trace_event.h"
+#include "flutter/common/threads.h"
 #include "flutter/shell/common/switches.h"
 #include "flutter/shell/gpu/gpu_rasterizer.h"
 #include "flutter/shell/platform/darwin/common/platform_mac.h"
-#include "flutter/shell/platform/darwin/common/platform_service_provider.h"
-#include "flutter/shell/platform/darwin/common/view_service_provider.h"
+#include "flutter/shell/platform/darwin/desktop/vsync_waiter_mac.h"
 #include "lib/ftl/synchronization/waitable_event.h"
 
 namespace shell {
@@ -24,6 +24,8 @@ PlatformViewMac::PlatformViewMac(NSOpenGLView* gl_view)
       resource_loading_context_([[NSOpenGLContext alloc]
           initWithFormat:gl_view.pixelFormat
             shareContext:gl_view.openGLContext]) {
+  CreateEngine();
+
   NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                                        NSUserDomainMask, YES);
   if (paths.count > 0) {
@@ -34,29 +36,8 @@ PlatformViewMac::PlatformViewMac(NSOpenGLView* gl_view)
 
 PlatformViewMac::~PlatformViewMac() = default;
 
-static void IgnoreRequest(
-    mojo::InterfaceRequest<flutter::platform::ApplicationMessages>) {}
-
-void PlatformViewMac::ConnectToEngineAndSetupServices() {
-  ConnectToEngine(mojo::GetProxy(&sky_engine_));
-
-  mojo::ServiceProviderPtr service_provider;
-  new PlatformServiceProvider(mojo::GetProxy(&service_provider));
-
-  mojo::ServiceProviderPtr view_service_provider;
-  new ViewServiceProvider(IgnoreRequest,
-                          mojo::GetProxy(&view_service_provider));
-
-  sky::ServicesDataPtr services = sky::ServicesData::New();
-  services->incoming_services = service_provider.Pass();
-  services->view_services = view_service_provider.Pass();
-  sky_engine_->SetServices(services.Pass());
-}
-
 void PlatformViewMac::SetupAndLoadDart() {
-  ConnectToEngineAndSetupServices();
-
-  if (AttemptLaunchFromCommandLineSwitches(sky_engine_)) {
+  if (AttemptLaunchFromCommandLineSwitches(&engine())) {
     // This attempts launching from an FLX bundle that does not contain a
     // dart snapshot.
     return;
@@ -64,32 +45,40 @@ void PlatformViewMac::SetupAndLoadDart() {
 
   base::CommandLine& command_line = *base::CommandLine::ForCurrentProcess();
 
-  std::string bundle_path = command_line.GetSwitchValueASCII(switches::kFLX);
+  std::string bundle_path =
+      command_line.GetSwitchValueASCII(FlagForSwitch(Switch::FLX));
   if (!bundle_path.empty()) {
-    std::string script_uri = std::string("file://") + bundle_path;
-    sky_engine_->RunFromBundle(script_uri, bundle_path);
+    blink::Threads::UI()->PostTask(
+        [ engine = engine().GetWeakPtr(), bundle_path ] {
+          if (engine)
+            engine->RunBundle(bundle_path);
+        });
     return;
   }
 
   auto args = command_line.GetArgs();
   if (args.size() > 0) {
-    auto packages = command_line.GetSwitchValueASCII(switches::kPackages);
-    sky_engine_->RunFromFile(args[0], packages, "");
+    std::string main = args[0];
+    std::string packages =
+        command_line.GetSwitchValueASCII(FlagForSwitch(Switch::Packages));
+    blink::Threads::UI()->PostTask(
+        [ engine = engine().GetWeakPtr(), main, packages ] {
+          if (engine)
+            engine->RunBundleAndSource(std::string(), main, packages);
+        });
     return;
   }
 }
 
 void PlatformViewMac::SetupAndLoadFromSource(
+    const std::string& assets_directory,
     const std::string& main,
-    const std::string& packages,
-    const std::string& assets_directory) {
-  ConnectToEngineAndSetupServices();
-
-  sky_engine_->RunFromFile(main, packages, assets_directory);
-}
-
-sky::SkyEnginePtr& PlatformViewMac::engineProxy() {
-  return sky_engine_;
+    const std::string& packages) {
+  blink::Threads::UI()->PostTask(
+      [ engine = engine().GetWeakPtr(), assets_directory, main, packages ] {
+        if (engine)
+          engine->RunBundleAndSource(assets_directory, main, packages);
+      });
 }
 
 intptr_t PlatformViewMac::GLContextFBO() const {
@@ -127,6 +116,12 @@ bool PlatformViewMac::GLContextPresent() {
   return true;
 }
 
+VsyncWaiter* PlatformViewMac::GetVsyncWaiter() {
+  if (!vsync_waiter_)
+    vsync_waiter_ = std::make_unique<VsyncWaiterMac>();
+  return vsync_waiter_.get();
+}
+
 bool PlatformViewMac::ResourceContextMakeCurrent() {
   NSOpenGLContext* context = resource_loading_context_.get();
 
@@ -152,13 +147,13 @@ bool PlatformViewMac::IsValid() const {
   return true;
 }
 
-void PlatformViewMac::RunFromSource(const std::string& main,
-                                    const std::string& packages,
-                                    const std::string& assets_directory) {
+void PlatformViewMac::RunFromSource(const std::string& assets_directory,
+                                    const std::string& main,
+                                    const std::string& packages) {
   auto latch = new ftl::ManualResetWaitableEvent();
 
   dispatch_async(dispatch_get_main_queue(), ^{
-    SetupAndLoadFromSource(main, packages, assets_directory);
+    SetupAndLoadFromSource(assets_directory, main, packages);
     latch->Signal();
   });
 

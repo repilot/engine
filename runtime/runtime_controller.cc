@@ -40,23 +40,16 @@ void RuntimeController::CreateDartController(const std::string& script_uri) {
 
   Window* window = GetWindow();
 
-  if (viewport_metrics_)
-    window->UpdateWindowMetrics(viewport_metrics_);
-
+  window->UpdateWindowMetrics(viewport_metrics_);
   window->UpdateLocale(language_code_, country_code_);
 
   if (semantics_enabled_)
     window->UpdateSemanticsEnabled(semantics_enabled_);
 }
 
-void RuntimeController::SetViewportMetrics(
-    const sky::ViewportMetricsPtr& metrics) {
-  if (metrics) {
-    viewport_metrics_ = metrics->Clone();
-    GetWindow()->UpdateWindowMetrics(viewport_metrics_);
-  } else {
-    viewport_metrics_ = nullptr;
-  }
+void RuntimeController::SetViewportMetrics(const ViewportMetrics& metrics) {
+  viewport_metrics_ = metrics;
+  GetWindow()->UpdateWindowMetrics(viewport_metrics_);
 }
 
 void RuntimeController::SetLocale(const std::string& language_code,
@@ -76,16 +69,14 @@ void RuntimeController::SetSemanticsEnabled(bool enabled) {
   GetWindow()->UpdateSemanticsEnabled(semantics_enabled_);
 }
 
-void RuntimeController::PushRoute(const std::string& route) {
-  GetWindow()->PushRoute(route);
-}
-
-void RuntimeController::PopRoute() {
-  GetWindow()->PopRoute();
-}
-
 void RuntimeController::BeginFrame(ftl::TimePoint frame_time) {
   GetWindow()->BeginFrame(frame_time);
+}
+
+void RuntimeController::DispatchPlatformMessage(
+    ftl::RefPtr<PlatformMessage> message) {
+  TRACE_EVENT0("flutter", "RuntimeController::DispatchPlatformMessage");
+  GetWindow()->DispatchPlatformMessage(std::move(message));
 }
 
 void RuntimeController::DispatchPointerDataPacket(
@@ -124,11 +115,6 @@ void RuntimeController::HandlePlatformMessage(
 
 void RuntimeController::DidCreateSecondaryIsolate(Dart_Isolate isolate) {
   client_->DidCreateSecondaryIsolate(isolate);
-}
-
-void RuntimeController::OnAppLifecycleStateChanged(
-    sky::AppLifecycleState state) {
-  GetWindow()->OnAppLifecycleStateChanged(state);
 }
 
 Dart_Port RuntimeController::GetMainPort() {

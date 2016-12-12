@@ -18,15 +18,6 @@
 
 namespace tonic {
 class DartLibraryNatives;
-
-template <>
-struct DartConverter<SkCanvas::PointMode>
-    : public DartConverterInteger<SkCanvas::PointMode> {};
-
-template <>
-struct DartConverter<SkCanvas::VertexMode>
-    : public DartConverterInteger<SkCanvas::VertexMode> {};
-
 }  // namespace tonic
 
 namespace blink {
@@ -68,7 +59,7 @@ class Canvas : public ftl::RefCountedThreadSafe<Canvas>,
   void clipRRect(const RRect& rrect);
   void clipPath(const CanvasPath* path);
 
-  void drawColor(SkColor color, SkXfermode::Mode transfer_mode);
+  void drawColor(SkColor color, SkBlendMode blend_mode);
   void drawLine(double x1,
                 double y1,
                 double x2,
@@ -157,7 +148,7 @@ class Canvas : public ftl::RefCountedThreadSafe<Canvas>,
                     const tonic::Float32List& vertices,
                     const tonic::Float32List& texture_coordinates,
                     const tonic::Int32List& colors,
-                    SkXfermode::Mode transfer_mode,
+                    SkBlendMode blend_mode,
                     const tonic::Int32List& indices);
 
   void drawAtlas(const Paint& paint,
@@ -166,7 +157,7 @@ class Canvas : public ftl::RefCountedThreadSafe<Canvas>,
                  const tonic::Float32List& transforms,
                  const tonic::Float32List& rects,
                  const tonic::Int32List& colors,
-                 SkXfermode::Mode transfer_mode,
+                 SkBlendMode blend_mode,
                  const tonic::Float32List& cull_rect);
 
   SkCanvas* canvas() const { return canvas_; }

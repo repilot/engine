@@ -8,13 +8,14 @@
 #import <OpenGLES/ES2/gl.h>
 #import <OpenGLES/ES2/glext.h>
 #import <QuartzCore/CAEAGLLayer.h>
+#include <utility>
+
 #include "base/mac/scoped_nsautorelease_pool.h"
 #include "base/trace_event/trace_event.h"
+#include "flutter/common/threads.h"
 #include "flutter/shell/gpu/gpu_rasterizer.h"
-#include "flutter/shell/platform/darwin/common/platform_service_provider.h"
-#include "flutter/shell/platform/darwin/common/view_service_provider.h"
+#include "flutter/shell/platform/darwin/ios/framework/Source/vsync_waiter_ios.h"
 #include "lib/ftl/synchronization/waitable_event.h"
-#include "mojo/public/cpp/application/connect.h"
 
 namespace shell {
 
@@ -168,32 +169,6 @@ class IOSGLContext {
 
   GLuint framebuffer() const { return framebuffer_; }
 
-  bool MakeCurrent() {
-    base::mac::ScopedNSAutoreleasePool pool;
-
-    return UpdateStorageSizeIfNecessary() &&
-           [EAGLContext setCurrentContext:context_.get()];
-  }
-
-  bool ResourceMakeCurrent() {
-    base::mac::ScopedNSAutoreleasePool pool;
-
-    return [EAGLContext setCurrentContext:resource_context_.get()];
-  }
-
- private:
-  base::scoped_nsobject<CAEAGLLayer> layer_;
-  base::scoped_nsobject<EAGLContext> context_;
-  base::scoped_nsobject<EAGLContext> resource_context_;
-
-  GLuint framebuffer_;
-  GLuint colorbuffer_;
-  GLuint depthbuffer_;
-  GLuint stencilbuffer_;
-  GLuint depth_stencil_packed_buffer_;
-
-  GLintSize storage_size_;
-
   bool UpdateStorageSizeIfNecessary() {
     GLintSize size([layer_.get() bounds].size);
 
@@ -268,12 +243,39 @@ class IOSGLContext {
     return true;
   }
 
+  bool MakeCurrent() {
+    base::mac::ScopedNSAutoreleasePool pool;
+
+    return UpdateStorageSizeIfNecessary() &&
+           [EAGLContext setCurrentContext:context_.get()];
+  }
+
+  bool ResourceMakeCurrent() {
+    base::mac::ScopedNSAutoreleasePool pool;
+
+    return [EAGLContext setCurrentContext:resource_context_.get()];
+  }
+
+ private:
+  base::scoped_nsobject<CAEAGLLayer> layer_;
+  base::scoped_nsobject<EAGLContext> context_;
+  base::scoped_nsobject<EAGLContext> resource_context_;
+  GLuint framebuffer_;
+  GLuint colorbuffer_;
+  GLuint depthbuffer_;
+  GLuint stencilbuffer_;
+  GLuint depth_stencil_packed_buffer_;
+  GLintSize storage_size_;
+
   FTL_DISALLOW_COPY_AND_ASSIGN(IOSGLContext);
 };
 
 PlatformViewIOS::PlatformViewIOS(CAEAGLLayer* layer)
     : PlatformView(std::make_unique<GPURasterizer>()),
-      context_(std::make_unique<IOSGLContext>(surface_config_, layer)) {
+      context_(std::make_unique<IOSGLContext>(surface_config_, layer)),
+      weak_factory_(this) {
+  CreateEngine();
+
   NSArray* paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
                                                        NSUserDomainMask, YES);
   shell::Shell::Shared().tracing_controller().set_traces_base_path(
@@ -282,23 +284,10 @@ PlatformViewIOS::PlatformViewIOS(CAEAGLLayer* layer)
 
 PlatformViewIOS::~PlatformViewIOS() = default;
 
-sky::SkyEnginePtr& PlatformViewIOS::engineProxy() {
-  return engine_;
-}
-
-flutter::platform::ApplicationMessagesPtr& PlatformViewIOS::AppMessageSender() {
-  return app_message_sender_;
-}
-
-shell::ApplicationMessagesImpl& PlatformViewIOS::AppMessageReceiver() {
-  return app_message_receiver_;
-}
-
 void PlatformViewIOS::ToggleAccessibility(UIView* view, bool enabled) {
   if (enabled) {
     if (!accessibility_bridge_) {
-      accessibility_bridge_.reset(
-          new shell::AccessibilityBridge(view, this));
+      accessibility_bridge_.reset(new shell::AccessibilityBridge(view, this));
     }
   } else {
     accessibility_bridge_ = nullptr;
@@ -306,45 +295,33 @@ void PlatformViewIOS::ToggleAccessibility(UIView* view, bool enabled) {
   SetSemanticsEnabled(enabled);
 }
 
-void PlatformViewIOS::ConnectToEngineAndSetupServices() {
-  ConnectToEngine(mojo::GetProxy(&engine_));
-
-  mojo::ServiceProviderPtr service_provider;
-
-  auto service_provider_proxy = mojo::GetProxy(&service_provider);
-
-  new PlatformServiceProvider(service_provider_proxy.Pass());
-
-  ftl::WeakPtr<ApplicationMessagesImpl> appplication_messages_impl =
-      app_message_receiver_.GetWeakPtr();
-
-  mojo::ServiceProviderPtr viewServiceProvider;
-
-  new ViewServiceProvider(
-      [appplication_messages_impl](
-          mojo::InterfaceRequest<flutter::platform::ApplicationMessages>
-              request) {
-        if (appplication_messages_impl)
-          appplication_messages_impl->AddBinding(std::move(request));
-      },
-      mojo::GetProxy(&viewServiceProvider));
-
-  sky::ServicesDataPtr services = sky::ServicesData::New();
-  services->incoming_services = service_provider.Pass();
-  services->outgoing_services = mojo::GetProxy(&dart_services_);
-  services->view_services = viewServiceProvider.Pass();
-  engine_->SetServices(services.Pass());
-
-  mojo::ConnectToService(dart_services_.get(),
-                         mojo::GetProxy(&app_message_sender_));
+void PlatformViewIOS::SetupAndLoadFromSource(
+    const std::string& assets_directory,
+    const std::string& main,
+    const std::string& packages) {
+  blink::Threads::UI()->PostTask(
+      [ engine = engine().GetWeakPtr(), assets_directory, main, packages ] {
+        if (engine)
+          engine->RunBundleAndSource(assets_directory, main, packages);
+      });
 }
 
-void PlatformViewIOS::SetupAndLoadFromSource(
-    const std::string& main,
-    const std::string& packages,
-    const std::string& assets_directory) {
-  ConnectToEngineAndSetupServices();
-  engine_->RunFromFile(main, packages, assets_directory);
+ftl::WeakPtr<PlatformViewIOS> PlatformViewIOS::GetWeakPtr() {
+  return weak_factory_.GetWeakPtr();
+}
+
+void PlatformViewIOS::UpdateSurfaceSize() {
+  blink::Threads::Gpu()->PostTask([self = GetWeakPtr()]() {
+    if (self && self->context_ != nullptr) {
+      self->context_->UpdateStorageSizeIfNecessary();
+    }
+  });
+}
+
+VsyncWaiter* PlatformViewIOS::GetVsyncWaiter() {
+  if (!vsync_waiter_)
+    vsync_waiter_ = std::make_unique<VsyncWaiterIOS>();
+  return vsync_waiter_.get();
 }
 
 bool PlatformViewIOS::ResourceContextMakeCurrent() {
@@ -369,24 +346,29 @@ bool PlatformViewIOS::GLContextPresent() {
   return context_ != nullptr ? context_->PresentRenderBuffer() : false;
 }
 
-void PlatformViewIOS::RunFromSource(const std::string& main,
-                                    const std::string& packages,
-                                    const std::string& assets_directory) {
+void PlatformViewIOS::UpdateSemantics(
+    std::vector<blink::SemanticsNode> update) {
+  if (accessibility_bridge_)
+    accessibility_bridge_->UpdateSemantics(std::move(update));
+}
+
+void PlatformViewIOS::HandlePlatformMessage(
+    ftl::RefPtr<blink::PlatformMessage> message) {
+  platform_message_router_.HandlePlatformMessage(std::move(message));
+}
+
+void PlatformViewIOS::RunFromSource(const std::string& assets_directory,
+                                    const std::string& main,
+                                    const std::string& packages) {
   auto latch = new ftl::ManualResetWaitableEvent();
 
   dispatch_async(dispatch_get_main_queue(), ^{
-    SetupAndLoadFromSource(main, packages, assets_directory);
+    SetupAndLoadFromSource(assets_directory, main, packages);
     latch->Signal();
   });
 
   latch->Wait();
   delete latch;
-}
-
-void PlatformViewIOS::UpdateSemantics(
-    std::vector<blink::SemanticsNode> update) {
-  if (accessibility_bridge_)
-    accessibility_bridge_->UpdateSemantics(std::move(update));
 }
 
 }  // namespace shell

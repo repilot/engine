@@ -6,30 +6,37 @@
 
 #include <sys/stat.h>
 #include <unistd.h>
+#include <memory>
 #include <utility>
 
 #include "flutter/assets/directory_asset_bundle.h"
 #include "flutter/assets/unzipper_provider.h"
-#include "flutter/assets/zip_asset_bundle.h"
+#include "flutter/assets/zip_asset_store.h"
+#include "flutter/common/settings.h"
 #include "flutter/common/threads.h"
-#include "flutter/glue/movable_wrapper.h"
 #include "flutter/glue/trace_event.h"
-#include "flutter/lib/ui/mojo_services.h"
 #include "flutter/runtime/asset_font_selector.h"
 #include "flutter/runtime/dart_controller.h"
 #include "flutter/runtime/dart_init.h"
 #include "flutter/runtime/runtime_init.h"
+#include "flutter/runtime/test_font_selector.h"
 #include "flutter/shell/common/animator.h"
 #include "flutter/shell/common/platform_view.h"
 #include "flutter/sky/engine/public/web/Sky.h"
+#include "lib/ftl/files/file.h"
 #include "lib/ftl/files/path.h"
 #include "lib/ftl/functional/make_copyable.h"
-#include "mojo/public/cpp/application/connect.h"
+#include "third_party/rapidjson/rapidjson/document.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "third_party/skia/include/core/SkPictureRecorder.h"
 
 namespace shell {
 namespace {
+
+constexpr char kAssetChannel[] = "flutter/assets";
+constexpr char kLifecycleChannel[] = "flutter/lifecycle";
+constexpr char kNavigationChannel[] = "flutter/navigation";
+constexpr char kLocalizationChannel[] = "flutter/localization";
 
 bool PathExists(const std::string& path) {
   return access(path.c_str(), R_OK) == 0;
@@ -47,13 +54,18 @@ std::string FindPackagesPath(const std::string& main_dart) {
   return packages_path;
 }
 
+std::string GetScriptUriFromPath(const std::string& path) {
+  return "file://" + path;
+}
+
 }  // namespace
 
 Engine::Engine(PlatformView* platform_view)
     : platform_view_(platform_view->GetWeakPtr()),
-      animator_(new Animator(platform_view->rasterizer().GetWeakRasterizerPtr(),
-                             this)),
-      binding_(this),
+      animator_(std::make_unique<Animator>(
+          platform_view->rasterizer().GetWeakRasterizerPtr(),
+          platform_view->GetVsyncWaiter(),
+          this)),
       activity_running_(false),
       have_surface_(false),
       weak_factory_(this) {}
@@ -68,6 +80,56 @@ void Engine::Init() {
   blink::InitRuntime();
 }
 
+void Engine::RunBundle(const std::string& bundle_path) {
+  TRACE_EVENT0("flutter", "Engine::RunBundle");
+  ConfigureAssetBundle(bundle_path);
+  ConfigureRuntime(GetScriptUriFromPath(bundle_path));
+  if (blink::IsRunningPrecompiledCode()) {
+    runtime_->dart_controller()->RunFromPrecompiledSnapshot();
+  } else {
+    std::vector<uint8_t> snapshot;
+    if (!GetAssetAsBuffer(blink::kSnapshotAssetKey, &snapshot))
+      return;
+    runtime_->dart_controller()->RunFromSnapshot(snapshot.data(),
+                                                 snapshot.size());
+  }
+}
+
+void Engine::RunBundleAndSnapshot(const std::string& bundle_path,
+                                  const std::string& snapshot_override) {
+  TRACE_EVENT0("flutter", "Engine::RunBundleAndSnapshot");
+  if (snapshot_override.empty()) {
+    RunBundle(bundle_path);
+    return;
+  }
+  ConfigureAssetBundle(bundle_path);
+  ConfigureRuntime(GetScriptUriFromPath(bundle_path));
+  if (blink::IsRunningPrecompiledCode()) {
+    runtime_->dart_controller()->RunFromPrecompiledSnapshot();
+  } else {
+    std::vector<uint8_t> snapshot;
+    if (!files::ReadFileToVector(snapshot_override, &snapshot))
+      return;
+    runtime_->dart_controller()->RunFromSnapshot(snapshot.data(),
+                                                 snapshot.size());
+  }
+}
+
+void Engine::RunBundleAndSource(const std::string& bundle_path,
+                                const std::string& main,
+                                const std::string& packages) {
+  TRACE_EVENT0("flutter", "Engine::RunBundleAndSource");
+  FTL_CHECK(!blink::IsRunningPrecompiledCode())
+      << "Cannot run from source in a precompiled build.";
+  std::string packages_path = packages;
+  if (packages_path.empty())
+    packages_path = FindPackagesPath(main);
+  if (!bundle_path.empty())
+    ConfigureAssetBundle(bundle_path);
+  ConfigureRuntime(GetScriptUriFromPath(main));
+  runtime_->dart_controller()->RunFromSource(main, packages_path);
+}
+
 void Engine::BeginFrame(ftl::TimePoint frame_time) {
   TRACE_EVENT0("flutter", "Engine::BeginFrame");
   if (runtime_)
@@ -76,15 +138,8 @@ void Engine::BeginFrame(ftl::TimePoint frame_time) {
 
 void Engine::RunFromSource(const std::string& main,
                            const std::string& packages,
-                           const std::string& bundle) {
-  TRACE_EVENT0("flutter", "Engine::RunFromSource");
-  std::string packages_path = packages;
-  if (packages_path.empty())
-    packages_path = FindPackagesPath(main);
-  if (!bundle.empty())
-    ConfigureAssetBundle(bundle);
-  ConfigureRuntime(main);
-  runtime_->dart_controller()->RunFromSource(main, packages_path);
+                           const std::string& bundle_path) {
+  RunBundleAndSource(bundle_path, main, packages);
 }
 
 Dart_Port Engine::GetUIIsolateMainPort() {
@@ -98,10 +153,6 @@ std::string Engine::GetUIIsolateName() {
     return "";
   }
   return runtime_->GetIsolateName();
-}
-
-void Engine::ConnectToEngine(mojo::InterfaceRequest<SkyEngine> request) {
-  binding_.Bind(request.Pass());
 }
 
 void Engine::OnOutputSurfaceCreated(const ftl::Closure& gpu_continuation) {
@@ -118,81 +169,115 @@ void Engine::OnOutputSurfaceDestroyed(const ftl::Closure& gpu_continuation) {
   blink::Threads::Gpu()->PostTask(gpu_continuation);
 }
 
-void Engine::SetServices(sky::ServicesDataPtr services) {
-  services_ = services.Pass();
-
-  if (services_->incoming_services) {
-    incoming_services_ =
-        mojo::ServiceProviderPtr::Create(services_->incoming_services.Pass());
-    service_provider_impl_.set_fallback_service_provider(
-        incoming_services_.get());
-  }
-
-  vsync::VSyncProviderPtr vsync_provider;
-  if (services_->shell) {
-    // We bind and unbind our Shell here, since this is the only place we
-    // use
-    // it in this class.
-    auto shell = mojo::ShellPtr::Create(services_->shell.Pass());
-    mojo::ConnectToService(shell.get(), "mojo:vsync",
-                           mojo::GetProxy(&vsync_provider));
-    services_->shell = shell.Pass();
-  } else {
-    mojo::ConnectToService(incoming_services_.get(),
-                           mojo::GetProxy(&vsync_provider));
-  }
-  animator_->set_vsync_provider(vsync_provider.Pass());
-}
-
-void Engine::OnViewportMetricsChanged(sky::ViewportMetricsPtr metrics) {
-  viewport_metrics_ = metrics.Pass();
+void Engine::SetViewportMetrics(const blink::ViewportMetrics& metrics) {
+  viewport_metrics_ = metrics;
   if (runtime_)
     runtime_->SetViewportMetrics(viewport_metrics_);
 }
 
-void Engine::OnLocaleChanged(const mojo::String& language_code,
-                             const mojo::String& country_code) {
-  language_code_ = language_code;
-  country_code_ = country_code;
+void Engine::DispatchPlatformMessage(
+    ftl::RefPtr<blink::PlatformMessage> message) {
+  if (message->channel() == kLifecycleChannel) {
+    if (HandleLifecyclePlatformMessage(message.get()))
+      return;
+  } else if (message->channel() == kLocalizationChannel) {
+    if (HandleLocalizationPlatformMessage(std::move(message)))
+      return;
+  }
+
+  if (runtime_) {
+    runtime_->DispatchPlatformMessage(std::move(message));
+    return;
+  }
+
+  // If there's no runtime_, we need to buffer some navigation messages.
+  if (message->channel() == kNavigationChannel)
+    HandleNavigationPlatformMessage(std::move(message));
+}
+
+bool Engine::HandleLifecyclePlatformMessage(blink::PlatformMessage* message) {
+  const auto& data = message->data();
+  std::string state(reinterpret_cast<const char*>(data.data()), data.size());
+  if (state == "AppLifecycleState.paused") {
+    activity_running_ = false;
+    StopAnimator();
+  } else if (state == "AppLifecycleState.resumed") {
+    activity_running_ = true;
+    StartAnimatorIfPossible();
+  }
+  return false;
+}
+
+bool Engine::HandleNavigationPlatformMessage(
+    ftl::RefPtr<blink::PlatformMessage> message) {
+  FTL_DCHECK(!runtime_);
+  const auto& data = message->data();
+
+  rapidjson::Document document;
+  document.Parse(reinterpret_cast<const char*>(data.data()), data.size());
+  if (document.HasParseError() || !document.IsObject())
+    return false;
+  auto root = document.GetObject();
+  auto method = root.FindMember("method");
+  if (method == root.MemberEnd() || method->value != "pushRoute")
+    return false;
+
+  pending_push_route_message_ = std::move(message);
+  return true;
+}
+
+bool Engine::HandleLocalizationPlatformMessage(
+    ftl::RefPtr<blink::PlatformMessage> message) {
+  const auto& data = message->data();
+
+  rapidjson::Document document;
+  document.Parse(reinterpret_cast<const char*>(data.data()), data.size());
+  if (document.HasParseError() || !document.IsObject())
+    return false;
+  auto root = document.GetObject();
+  auto method = root.FindMember("method");
+  if (method == root.MemberEnd() || method->value != "setLocale")
+    return false;
+
+  auto args = root.FindMember("args");
+  if (args == root.MemberEnd() || !args->value.IsArray())
+    return false;
+
+  const auto& language = args->value[0];
+  const auto& country = args->value[1];
+
+  if (!language.IsString() || !country.IsString())
+    return false;
+
+  language_code_ = language.GetString();
+  country_code_ = country.GetString();
   if (runtime_)
     runtime_->SetLocale(language_code_, country_code_);
+  return true;
 }
 
 void Engine::DispatchPointerDataPacket(const PointerDataPacket& packet) {
-  TRACE_EVENT0("flutter", "Engine::DispatchPointerDataPacket");
   if (runtime_)
     runtime_->DispatchPointerDataPacket(packet);
 }
 
 void Engine::DispatchSemanticsAction(int id, blink::SemanticsAction action) {
-  TRACE_EVENT0("flutter", "Engine::DispatchPointerDataPacket");
   if (runtime_)
     runtime_->DispatchSemanticsAction(id, action);
 }
 
 void Engine::SetSemanticsEnabled(bool enabled) {
-  TRACE_EVENT0("flutter", "Engine::DispatchPointerDataPacket");
   semantics_enabled_ = enabled;
   if (runtime_)
     runtime_->SetSemanticsEnabled(semantics_enabled_);
 }
 
-void Engine::RunFromSnapshotStream(
-    const std::string& script_uri,
-    mojo::ScopedDataPipeConsumerHandle snapshot) {
-  TRACE_EVENT0("flutter", "Engine::RunFromSnapshotStream");
-  ConfigureRuntime(script_uri);
-  snapshot_drainer_.reset(new glue::DrainDataPipeJob(
-      std::move(snapshot), [this](std::vector<char> snapshot) {
-        FTL_DCHECK(runtime_);
-        FTL_DCHECK(runtime_->dart_controller());
-        runtime_->dart_controller()->RunFromSnapshot(
-            reinterpret_cast<uint8_t*>(snapshot.data()), snapshot.size());
-      }));
-}
-
 void Engine::ConfigureAssetBundle(const std::string& path) {
   struct stat stat_result = {0};
+
+  directory_asset_bundle_.reset();
+  // TODO(abarth): We should reset asset_store_ as well, but that might break
+  // custom font loading in hot reload.
 
   if (::stat(path.c_str(), &stat_result) != 0) {
     LOG(INFO) << "Could not configure asset bundle at path: " << path;
@@ -200,128 +285,37 @@ void Engine::ConfigureAssetBundle(const std::string& path) {
   }
 
   if (S_ISDIR(stat_result.st_mode)) {
-    // Directory asset bundle.
-    new blink::DirectoryAssetBundle(mojo::GetProxy(&root_bundle_), path,
-                                    blink::Threads::IO());
+    directory_asset_bundle_ =
+        std::make_unique<blink::DirectoryAssetBundle>(path);
     return;
   }
 
   if (S_ISREG(stat_result.st_mode)) {
-    // Zip asset bundle.
     asset_store_ = ftl::MakeRefCounted<blink::ZipAssetStore>(
-        blink::GetUnzipperProviderForPath(path), blink::Threads::IO());
-    new blink::ZipAssetBundle(mojo::GetProxy(&root_bundle_), asset_store_);
+        blink::GetUnzipperProviderForPath(path));
     return;
   }
 }
 
 void Engine::ConfigureRuntime(const std::string& script_uri) {
-  snapshot_drainer_.reset();
   runtime_ = blink::RuntimeController::Create(this);
   runtime_->CreateDartController(std::move(script_uri));
   runtime_->SetViewportMetrics(viewport_metrics_);
   runtime_->SetLocale(language_code_, country_code_);
   runtime_->SetSemanticsEnabled(semantics_enabled_);
-  if (!initial_route_.empty())
-    runtime_->PushRoute(initial_route_);
-}
-
-void Engine::RunFromPrecompiledSnapshot(const mojo::String& bundle_path) {
-  TRACE_EVENT0("flutter", "Engine::RunFromPrecompiledSnapshot");
-  ConfigureAssetBundle(bundle_path.get());
-  ConfigureRuntime("http://localhost");
-  runtime_->dart_controller()->RunFromPrecompiledSnapshot();
-}
-
-void Engine::RunFromFile(const mojo::String& main,
-                         const mojo::String& packages,
-                         const mojo::String& bundle) {
-  RunFromSource(main, packages, bundle);
-}
-
-void Engine::RunFromBundle(const mojo::String& script_uri,
-                           const mojo::String& path) {
-  TRACE_EVENT0("flutter", "Engine::RunFromBundle");
-  ConfigureAssetBundle(path);
-  mojo::DataPipe pipe;
-  asset_store_->GetAsStream(blink::kSnapshotAssetKey,
-                            std::move(pipe.producer_handle));
-  RunFromSnapshotStream(script_uri, std::move(pipe.consumer_handle));
-}
-
-void Engine::RunFromBundleAndSnapshot(const mojo::String& script_uri,
-                                      const mojo::String& bundle_path,
-                                      const mojo::String& snapshot_path) {
-  TRACE_EVENT0("flutter", "Engine::RunFromBundleAndSnapshot");
-
-  ConfigureAssetBundle(bundle_path);
-
-  asset_store_->AddOverlayFile(blink::kSnapshotAssetKey, snapshot_path);
-  mojo::DataPipe pipe;
-  asset_store_->GetAsStream(blink::kSnapshotAssetKey,
-                            std::move(pipe.producer_handle));
-  RunFromSnapshotStream(script_uri, std::move(pipe.consumer_handle));
-}
-
-void Engine::PushRoute(const mojo::String& route) {
-  if (runtime_)
-    runtime_->PushRoute(route);
-  else
-    initial_route_ = route;
-}
-
-void Engine::PopRoute() {
-  if (runtime_)
-    runtime_->PopRoute();
-}
-
-void Engine::OnAppLifecycleStateChanged(sky::AppLifecycleState state) {
-  switch (state) {
-    case sky::AppLifecycleState::PAUSED:
-      activity_running_ = false;
-      StopAnimator();
-      break;
-
-    case sky::AppLifecycleState::RESUMED:
-      activity_running_ = true;
-      StartAnimatorIfPossible();
-      break;
-  }
-
-  if (runtime_)
-    runtime_->OnAppLifecycleStateChanged(state);
+  if (pending_push_route_message_)
+    runtime_->DispatchPlatformMessage(std::move(pending_push_route_message_));
 }
 
 void Engine::DidCreateMainIsolate(Dart_Isolate isolate) {
-  mojo::ServiceProviderPtr services_from_embedder;
-  service_provider_bindings_.AddBinding(
-      &service_provider_impl_, mojo::GetProxy(&services_from_embedder));
-
-  blink::MojoServices::Create(isolate, std::move(services_),
-                              std::move(services_from_embedder),
-                              std::move(root_bundle_));
-
-  if (asset_store_)
+  if (blink::Settings::Get().use_test_fonts) {
+    blink::TestFontSelector::Install();
+  } else if (asset_store_) {
     blink::AssetFontSelector::Install(asset_store_);
+  }
 }
 
-void Engine::DidCreateSecondaryIsolate(Dart_Isolate isolate) {
-  mojo::ServiceProviderPtr services_from_embedder;
-  auto request = glue::WrapMovable(mojo::GetProxy(&services_from_embedder));
-  ftl::WeakPtr<Engine> engine = weak_factory_.GetWeakPtr();
-  blink::Threads::UI()->PostTask([engine, request]() mutable {
-    if (engine)
-      engine->BindToServiceProvider(request.Unwrap());
-  });
-  blink::MojoServices::Create(isolate, nullptr,
-                              std::move(services_from_embedder), nullptr);
-}
-
-void Engine::BindToServiceProvider(
-    mojo::InterfaceRequest<mojo::ServiceProvider> request) {
-  service_provider_bindings_.AddBinding(&service_provider_impl_,
-                                        request.Pass());
-}
+void Engine::DidCreateSecondaryIsolate(Dart_Isolate isolate) {}
 
 void Engine::StopAnimator() {
   animator_->Stop();
@@ -339,15 +333,12 @@ void Engine::ScheduleFrame() {
 void Engine::Render(std::unique_ptr<flow::LayerTree> layer_tree) {
   if (!layer_tree)
     return;
-  if (!viewport_metrics_)
-    return;
 
-  SkISize frame_size = SkISize::Make(viewport_metrics_->physical_width,
-                                     viewport_metrics_->physical_height);
+  SkISize frame_size = SkISize::Make(viewport_metrics_.physical_width,
+                                     viewport_metrics_.physical_height);
   if (frame_size.isEmpty())
     return;
 
-  layer_tree->set_scene_version(viewport_metrics_->scene_version);
   layer_tree->set_frame_size(frame_size);
   animator_->Render(std::move(layer_tree));
 }
@@ -362,12 +353,39 @@ void Engine::UpdateSemantics(std::vector<blink::SemanticsNode> update) {
 
 void Engine::HandlePlatformMessage(
     ftl::RefPtr<blink::PlatformMessage> message) {
+  if (message->channel() == kAssetChannel) {
+    HandleAssetPlatformMessage(std::move(message));
+    return;
+  }
   blink::Threads::Platform()->PostTask([
     platform_view = platform_view_, message = std::move(message)
   ]() mutable {
     if (platform_view)
       platform_view->HandlePlatformMessage(std::move(message));
   });
+}
+
+void Engine::HandleAssetPlatformMessage(
+    ftl::RefPtr<blink::PlatformMessage> message) {
+  ftl::RefPtr<blink::PlatformMessageResponse> response = message->response();
+  if (!response)
+    return;
+  const auto& data = message->data();
+  std::string asset_name(reinterpret_cast<const char*>(data.data()),
+                         data.size());
+  std::vector<uint8_t> asset_data;
+  if (GetAssetAsBuffer(asset_name, &asset_data)) {
+    response->Complete(std::move(asset_data));
+  } else {
+    response->CompleteWithError();
+  }
+}
+
+bool Engine::GetAssetAsBuffer(const std::string& name,
+                              std::vector<uint8_t>* data) {
+  return (directory_asset_bundle_ &&
+          directory_asset_bundle_->GetAsBuffer(name, data)) ||
+         (asset_store_ && asset_store_->GetAsBuffer(name, data));
 }
 
 }  // namespace shell

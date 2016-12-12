@@ -210,9 +210,7 @@ source_set("wtf") {
   }
 }
 
-executable("unittests") {
-  output_name = "flutter_wtf_unittests"
-
+executable("wtf_unittests") {
   testonly = true
 
   sources = [
@@ -239,10 +237,13 @@ executable("unittests") {
     "text/StringBuilderTest.cpp",
     "text/StringImplTest.cpp",
     "text/StringOperatorsTest.cpp",
-    "text/TextCodecReplacementTest.cpp",
     "text/TextCodecUTF8Test.cpp",
-    "text/WTFStringTest.cpp",
     "VectorTest.cpp",
+
+    # The following tests depend on either ICU or the locale. Disable them for
+    # now.
+    # "text/TextCodecReplacementTest.cpp",
+    # "text/WTFStringTest.cpp",
   ]
 
   configs += [
@@ -252,19 +253,8 @@ executable("unittests") {
 
   deps = [
     ":wtf",
+    # Does not use //flutter/testing because it needs and provides its own main
+    # function in RunAllTests.cpp.
     "//third_party/gtest",
   ]
-
-  if (is_fuchsia) {
-    deps += [ "//mojo/system" ]
-  } else {
-    # TODO(abarth): This is a lie - this test is not embedded in an environment
-    # that injects the system thunks, so system calls don't actually work. This
-    # just tricks the linker into thinking that an implementation of these calls
-    # will be injected at runtime so the link succeeds.
-    deps += [
-      "//mojo/public/cpp/environment:standalone",
-      "//mojo/public/platform/native:system",
-    ]
-  }
 }

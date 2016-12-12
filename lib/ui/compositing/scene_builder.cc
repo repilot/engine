@@ -18,9 +18,9 @@
 #include "flutter/lib/ui/painting/matrix.h"
 #include "flutter/lib/ui/painting/shader.h"
 #include "lib/ftl/build_config.h"
+#include "lib/tonic/converter/dart_converter.h"
 #include "lib/tonic/dart_args.h"
 #include "lib/tonic/dart_binding_macros.h"
-#include "lib/tonic/converter/dart_converter.h"
 #include "lib/tonic/dart_library_natives.h"
 #include "third_party/skia/include/core/SkColorFilter.h"
 
@@ -36,20 +36,21 @@ static void SceneBuilder_constructor(Dart_NativeArguments args) {
 
 IMPLEMENT_WRAPPERTYPEINFO(ui, SceneBuilder);
 
-#define FOR_EACH_BINDING(V)                      \
-  V(SceneBuilder, pushTransform)                 \
-  V(SceneBuilder, pushClipRect)                  \
-  V(SceneBuilder, pushClipRRect)                 \
-  V(SceneBuilder, pushClipPath)                  \
-  V(SceneBuilder, pushOpacity)                   \
-  V(SceneBuilder, pushColorFilter)               \
-  V(SceneBuilder, pushBackdropFilter)            \
-  V(SceneBuilder, pushShaderMask)                \
-  V(SceneBuilder, pop)                           \
-  V(SceneBuilder, addPicture)                    \
-  V(SceneBuilder, addChildScene)                 \
-  V(SceneBuilder, addPerformanceOverlay)         \
-  V(SceneBuilder, setRasterizerTracingThreshold) \
+#define FOR_EACH_BINDING(V)                         \
+  V(SceneBuilder, pushTransform)                    \
+  V(SceneBuilder, pushClipRect)                     \
+  V(SceneBuilder, pushClipRRect)                    \
+  V(SceneBuilder, pushClipPath)                     \
+  V(SceneBuilder, pushOpacity)                      \
+  V(SceneBuilder, pushColorFilter)                  \
+  V(SceneBuilder, pushBackdropFilter)               \
+  V(SceneBuilder, pushShaderMask)                   \
+  V(SceneBuilder, pop)                              \
+  V(SceneBuilder, addPicture)                       \
+  V(SceneBuilder, addChildScene)                    \
+  V(SceneBuilder, addPerformanceOverlay)            \
+  V(SceneBuilder, setRasterizerTracingThreshold)    \
+  V(SceneBuilder, setCheckerboardRasterCacheImages) \
   V(SceneBuilder, build)
 
 FOR_EACH_BINDING(DART_NATIVE_CALLBACK)
@@ -61,7 +62,9 @@ void SceneBuilder::RegisterNatives(tonic::DartLibraryNatives* natives) {
 }
 
 SceneBuilder::SceneBuilder()
-    : m_currentLayer(nullptr), m_currentRasterizerTracingThreshold(0) {
+    : m_currentLayer(nullptr),
+      m_currentRasterizerTracingThreshold(0),
+      m_checkerboardRasterCacheImages(false) {
   m_cullRects.push(SkRect::MakeLargest());
 }
 
@@ -121,10 +124,10 @@ void SceneBuilder::pushOpacity(int alpha) {
   addLayer(std::move(layer), m_cullRects.top());
 }
 
-void SceneBuilder::pushColorFilter(int color, int transferMode) {
+void SceneBuilder::pushColorFilter(int color, int blendMode) {
   std::unique_ptr<flow::ColorFilterLayer> layer(new flow::ColorFilterLayer());
   layer->set_color(static_cast<SkColor>(color));
-  layer->set_transfer_mode(static_cast<SkXfermode::Mode>(transferMode));
+  layer->set_blend_mode(static_cast<SkBlendMode>(blendMode));
   addLayer(std::move(layer), m_cullRects.top());
 }
 
@@ -140,12 +143,12 @@ void SceneBuilder::pushShaderMask(Shader* shader,
                                   double maskRectRight,
                                   double maskRectTop,
                                   double maskRectBottom,
-                                  int transferMode) {
+                                  int blendMode) {
   std::unique_ptr<flow::ShaderMaskLayer> layer(new flow::ShaderMaskLayer());
   layer->set_shader(shader->shader());
   layer->set_mask_rect(SkRect::MakeLTRB(maskRectLeft, maskRectTop,
                                         maskRectRight, maskRectBottom));
-  layer->set_transfer_mode(static_cast<SkXfermode::Mode>(transferMode));
+  layer->set_blend_mode(static_cast<SkBlendMode>(blendMode));
   addLayer(std::move(layer), m_cullRects.top());
 }
 
@@ -200,15 +203,23 @@ void SceneBuilder::addChildScene(double dx,
                                  double devicePixelRatio,
                                  int physicalWidth,
                                  int physicalHeight,
-                                 uint32_t sceneToken) {
+                                 uint32_t sceneToken,
+                                 bool hitTestable) {
 #if defined(OS_FUCHSIA)
   if (!m_currentLayer)
     return;
+
+  SkRect sceneRect = SkRect::MakeXYWH(dx, dy, physicalWidth / devicePixelRatio,
+                                      physicalHeight / devicePixelRatio);
+  if (!SkRect::Intersects(sceneRect, m_cullRects.top()))
+    return;
+
   std::unique_ptr<flow::ChildSceneLayer> layer(new flow::ChildSceneLayer());
   layer->set_offset(SkPoint::Make(dx, dy));
   layer->set_device_pixel_ratio(devicePixelRatio);
   layer->set_physical_size(SkISize::Make(physicalWidth, physicalHeight));
   layer->set_scene_token(sceneToken);
+  layer->set_hit_testable(hitTestable);
   m_currentLayer->Add(std::move(layer));
 #endif
 }
@@ -230,11 +241,16 @@ void SceneBuilder::setRasterizerTracingThreshold(uint32_t frameInterval) {
   m_currentRasterizerTracingThreshold = frameInterval;
 }
 
+void SceneBuilder::setCheckerboardRasterCacheImages(bool checkerboard) {
+  m_checkerboardRasterCacheImages = checkerboard;
+}
+
 ftl::RefPtr<Scene> SceneBuilder::build() {
   m_currentLayer = nullptr;
   int32_t threshold = m_currentRasterizerTracingThreshold;
   m_currentRasterizerTracingThreshold = 0;
-  ftl::RefPtr<Scene> scene = Scene::create(std::move(m_rootLayer), threshold);
+  ftl::RefPtr<Scene> scene = Scene::create(std::move(m_rootLayer), threshold,
+                                           m_checkerboardRasterCacheImages);
   ClearDartWrapper();
   return scene;
 }

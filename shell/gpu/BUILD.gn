@@ -13,13 +13,13 @@ source_set("gpu") {
   ]
 
   deps = [
-    "../common",
     "//flutter/common",
     "//flutter/flow",
     "//flutter/glue",
-    "//flutter/skia",
+    "//flutter/shell/common",
     "//flutter/synchronization",
     "//lib/ftl",
-    "//mojo/public/cpp/system",
+    "//third_party/skia",
+    "//third_party/skia:gpu",
   ]
 }

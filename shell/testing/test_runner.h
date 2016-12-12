@@ -8,10 +8,8 @@
 #include <memory>
 #include <string>
 
-#include "flutter/services/engine/sky_engine.mojom.h"
 #include "lib/ftl/macros.h"
 #include "lib/ftl/memory/weak_ptr.h"
-#include "mojo/public/cpp/bindings/binding_set.h"
 
 namespace shell {
 
@@ -33,8 +31,6 @@ class TestRunner {
   ~TestRunner();
 
   std::unique_ptr<PlatformView> platform_view_;
-  sky::SkyEnginePtr sky_engine_;
-  ftl::WeakPtrFactory<TestRunner> weak_ptr_factory_;
 
   FTL_DISALLOW_COPY_AND_ASSIGN(TestRunner);
 };

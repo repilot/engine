@@ -23,9 +23,9 @@ action("gen_embedded_resources_cc") {
     "--output",
     rebase_path(output_file),
     "--outer_namespace",
-    "mojo",  # TODO(abarth): Change namespace.
+    "flutter",
     "--inner_namespace",
-    "dart",  # TODO(abarth): Change namespace.
+    "runtime",
     "--table_name",
     "flutter_embedded_service_isolate",
     "--root_prefix",
@@ -60,27 +60,36 @@ source_set("runtime") {
     "runtime_init.h",
     "start_up.cc",
     "start_up.h",
+    "test_font_data.cc",
+    "test_font_data.h",
+    "test_font_selector.cc",
+    "test_font_selector.h",
   ]
 
   deps = [
-    ":embedded_resources_cc",
-    "//dart/runtime:libdart",
     "//dart/runtime/bin:embedded_dart_io",
+    "//dart/runtime:libdart",
     "//flutter/assets",
     "//flutter/common",
     "//flutter/flow",
     "//flutter/glue",
     "//flutter/lib/io",
-    "//flutter/lib/mojo",
     "//flutter/lib/ui",
-    "//flutter/services/engine:interfaces",
-    "//flutter/skia",
     "//flutter/sky/engine/platform",
     "//lib/ftl",
     "//lib/tonic",
-    "//mojo/public/platform/dart:mojo_internal_impl",
     "//third_party/rapidjson",
+    "//third_party/skia",
+    ":embedded_resources_cc",
   ]
+
+  defines = []
+
+  if (current_toolchain == host_toolchain) {
+    # Though the test font data is small, we dont want to add to the binary size
+    # on the device. We only add the same on the host test shells.
+    defines += ["EMBED_TEST_FONT_DATA=1"]
+  }
 
   if (flutter_runtime_mode != "release") {
     deps += [

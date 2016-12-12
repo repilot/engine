@@ -20,15 +20,15 @@
 vars = {
   'chromium_git': 'https://chromium.googlesource.com',
   'fuchsia_git': 'https://fuchsia.googlesource.com',
+  'skia_git': 'https://skia.googlesource.com',
   'github_git': 'https://github.com',
-  'mojo_sdk_revision': '6b5fb1227c742f5ecc077486ebc029f2711c61fa',
-  'base_revision': '75e70c3387cf327702a0533e93bc480446da0806',
-  'skia_revision': 'e038489a743d6c0ab1cb208862c305180815bc8e',
+  'base_revision': 'b2412302ed4e45bfb47d7b5c0c3418077009e1ce',
+  'skia_revision': '130a118cc68f8f9973e9572356011de378463fea',
 
   # Note: When updating the Dart revision, ensure that all entries that are
   # dependencies of dart are also updated
-  'dart_revision': 'cfbf1a511e6e64d35789e34e161a7b10a88a439c',
-  'dart_boringssl_gen_revision': 'de218d3e1b6d210e1d132ecc748e0125d1020ac9',
+  'dart_revision': '554c3c9683264ab9840a2c2371942b5a9f5e1fae',
+  'dart_boringssl_gen_revision': '62c20247d582444cb2804f9ea4e3abaa6e47f6a5',
   'dart_boringssl_revision': '8d343b44bbab829d1a28fdef650ca95f7db4412e',
   'dart_observatory_packages_revision': '26aad88f1c1915d39bbcbff3cad589e2402fdcf1',
   'dart_root_certificates_revision': 'aed07942ce98507d2be28cbd29e879525410c7fc',
@@ -42,10 +42,11 @@ allowed_hosts = [
   'chromium.googlesource.com',
   'fuchsia.googlesource.com',
   'github.com',
+  'skia.googlesource.com',
 ]
 
 deps = {
-  'src': 'https://github.com/flutter/buildroot.git' + '@' + '9dcb5b06fe497f1bfd563e2c9293161070d5340c',
+  'src': 'https://github.com/flutter/buildroot.git' + '@' + '8bdd40871339d8297b2681bbe218543d80ceda1b',
 
    # Fuchsia compatibility
    #
@@ -54,16 +55,13 @@ deps = {
    # and not have to specific specific hashes.
 
   'src/lib/ftl':
-   Var('fuchsia_git') + '/ftl' + '@' + '4917351099cfb11d7bd9a808fd4fce67928c9e40',
+   Var('fuchsia_git') + '/ftl' + '@' + '9f51f24056554352b045fda338e9101c0e5af272',
 
   'src/lib/tonic':
-   Var('fuchsia_git') + '/tonic' + '@' + '5ca4053563027007ef2e7b2892efe63c26d30259',
+   Var('fuchsia_git') + '/tonic' + '@' + '4214b35e02a1286a5fb98895d0c480fa0da10f6d',
 
   'src/lib/zip':
    Var('fuchsia_git') + '/zip' + '@' + '92dc87ca645fe8e9f5151ef6dac86d8311a7222f',
-
-  'src/mojo/public':
-   Var('fuchsia_git') + '/mojo/public' + '@' + Var('mojo_sdk_revision'),
 
   'src/third_party/gtest':
    Var('fuchsia_git') + '/third_party/gtest' + '@' + 'c00f82917331efbbd27124b537e4ccc915a02b72',
@@ -106,19 +104,19 @@ deps = {
    '/external/github.com/dart-lang/observatory_pub_packages' + '@' +
    Var('dart_observatory_packages_revision'),
 
-  'src/dart/third_party/root_certificates':
+  'src/third_party/root_certificates':
    Var('chromium_git') +
    '/external/github.com/dart-lang/root_certificates' + '@' +
    Var('dart_root_certificates_revision'),
 
   'src/third_party/skia':
-   Var('chromium_git') + '/skia.git' + '@' +  Var('skia_revision'),
+   Var('skia_git') + '/skia.git' + '@' +  Var('skia_revision'),
 
   'src/third_party/yasm/source/patched-yasm':
    Var('chromium_git') + '/chromium/deps/yasm/patched-yasm.git' + '@' + '4671120cd8558ce62ee8672ebf3eb6f5216f909b',
 
-  'src/third_party/libjpeg_turbo':
-   Var('chromium_git') + '/chromium/deps/libjpeg_turbo.git' + '@' + '7260e4d8b8e1e40b17f03fafdf1cd83296900f76',
+  'src/third_party/libjpeg-turbo':
+   Var('skia_git') + '/third_party/libjpeg-turbo.git' + '@' + 'debddedc75850bcdeb8a57258572f48b802a4bb3',
 
    # Headers for Vulkan 1.0
    'src/third_party/vulkan':
@@ -146,8 +144,8 @@ deps_os = {
     'src/third_party/robolectric/lib':
       Var('chromium_git') + '/chromium/third_party/robolectric.git' + '@' + '6b63c99a8b6967acdb42cbed0adb067c80efc810',
 
-    'src/third_party/freetype-android/src':
-       Var('chromium_git') + '/chromium/src/third_party/freetype2.git' + '@' + 'e186230678ee8e4ea4ac4797ece8125761e3225a',
+    'src/third_party/freetype2':
+       Var('fuchsia_git') + '/third_party/freetype2' + '@' + 'e23a030e9b43c648249477fdf7bf5305d2cc8f59',
   },
 }
 
@@ -184,63 +182,6 @@ hooks = [
     'action': ['python', 'src/tools/dart/update.py'],
   },
   {
-    # Update LASTCHANGE. This is also run by export_tarball.py in
-    # src/tools/export_tarball - please keep them in sync.
-    'name': 'lastchange',
-    'pattern': '.',
-    'action': ['python', 'src/build/util/lastchange.py',
-               '-o', 'src/build/util/LASTCHANGE'],
-  },
-  # Pull binutils for linux, enabled debug fission for faster linking /
-  # debugging when used with clang on Ubuntu Precise.
-  # https://code.google.com/p/chromium/issues/detail?id=352046
-  {
-    'name': 'binutils',
-    'pattern': 'src/third_party/binutils',
-    'action': [
-        'python',
-        'src/third_party/binutils/download.py',
-    ],
-  },
-  # Pull eu-strip binaries using checked-in hashes.
-  {
-    'name': 'eu-strip',
-    'pattern': '.',
-    'action': [ 'download_from_google_storage',
-                '--no_resume',
-                '--quiet',
-                '--platform=linux*',
-                '--no_auth',
-                '--bucket', 'chromium-eu-strip',
-                '-s', 'src/build/linux/bin/eu-strip.sha1',
-    ],
-  },
-  # Pull the mojom parser binaries using checked-in hashes.
-  {
-    'name': 'mojom_tool',
-    'pattern': '',
-    'action': [ 'download_from_google_storage',
-                '--no_resume',
-                '--quiet',
-                '--platform=linux*',
-                '--no_auth',
-                '--bucket', 'mojo/mojom_parser/linux64',
-                '-s', 'src/mojo/public/tools/bindings/mojom_tool/bin/linux64/mojom.sha1',
-    ],
-  },
-  {
-    'name': 'mojom_tool',
-    'pattern': '',
-    'action': [ 'download_from_google_storage',
-                '--no_resume',
-                '--quiet',
-                '--platform=darwin',
-                '--no_auth',
-                '--bucket', 'mojo/mojom_parser/mac64',
-                '-s', 'src/mojo/public/tools/bindings/mojom_tool/bin/mac64/mojom.sha1',
-    ],
-  },
-  {
     # Ensure that we don't accidentally reference any .pyc files whose
     # corresponding .py files have already been deleted.
     'name': 'remove_stale_pyc_files',
@@ -249,31 +190,6 @@ hooks = [
         'python',
         'src/tools/remove_stale_pyc_files.py',
         'src/tools',
-    ],
-  },
-  # Pull the mojom generator binaries using checked-in hashes.
-  {
-    'name': 'mojom_generators',
-    'pattern': '',
-    'action': [ 'download_from_google_storage.py',
-                '--no_resume',
-                '--quiet',
-                '--platform=linux*',
-                '--no_auth',
-                '--bucket', 'mojo/mojom_parser/linux64/generators',
-                '-d', 'src/mojo/public/tools/bindings/mojom_tool/bin/linux64/generators',
-    ],
-  },
-  {
-    'name': 'mojom_generators',
-    'pattern': '',
-    'action': [ 'download_from_google_storage.py',
-                '--no_resume',
-                '--quiet',
-                '--platform=darwin',
-                '--no_auth',
-                '--bucket', 'mojo/mojom_parser/mac64/generators',
-                '-d', 'src/mojo/public/tools/bindings/mojom_tool/bin/mac64/generators',
     ],
   },
 ]

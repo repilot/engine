@@ -6,7 +6,9 @@
 
 namespace flow {
 
-ContainerLayer::ContainerLayer() {}
+ContainerLayer::ContainerLayer() {
+  ctm_.setIdentity();
+}
 
 ContainerLayer::~ContainerLayer() {}
 
@@ -23,16 +25,23 @@ void ContainerLayer::Preroll(PrerollContext* context, const SkMatrix& matrix) {
 
 void ContainerLayer::PrerollChildren(PrerollContext* context,
                                      const SkMatrix& matrix) {
-  SkRect child_paint_bounds;
+  SkRect child_paint_bounds = SkRect::MakeEmpty();
   for (auto& layer : layers_) {
     PrerollContext child_context = *context;
+    FTL_DCHECK(child_context.child_paint_bounds.isEmpty());
     layer->Preroll(&child_context, matrix);
+    if (layer->needs_system_composite())
+      set_needs_system_composite(true);
     child_paint_bounds.join(child_context.child_paint_bounds);
   }
   context->child_paint_bounds = child_paint_bounds;
+
+  if (needs_system_composite())
+    ctm_ = matrix;
 }
 
 void ContainerLayer::PaintChildren(PaintContext& context) const {
+  FTL_DCHECK(!needs_system_composite());
   // Intentionally not tracing here as there should be no self-time
   // and the trace event on this common function has a small overhead.
   for (auto& layer : layers_)
@@ -40,11 +49,34 @@ void ContainerLayer::PaintChildren(PaintContext& context) const {
 }
 
 #if defined(OS_FUCHSIA)
-void ContainerLayer::UpdateScene(mozart::SceneUpdate* update,
+
+void ContainerLayer::UpdateScene(SceneUpdateContext& context,
                                  mozart::Node* container) {
-  for (auto& layer : layers_)
-    layer->UpdateScene(update, container);
+  UpdateSceneChildren(context, container);
 }
-#endif
+
+void ContainerLayer::UpdateSceneChildrenInsideNode(SceneUpdateContext& context,
+                                                   mozart::Node* container,
+                                                   mozart::NodePtr node) {
+  FTL_DCHECK(needs_system_composite());
+  UpdateSceneChildren(context, node.get());
+  context.FinalizeCurrentPaintTaskIfNeeded(node.get(), ctm());
+  context.AddChildNode(container, std::move(node));
+}
+
+void ContainerLayer::UpdateSceneChildren(SceneUpdateContext& context,
+                                         mozart::Node* container) {
+  FTL_DCHECK(needs_system_composite());
+  for (auto& layer : layers_) {
+    if (layer->needs_system_composite()) {
+      context.FinalizeCurrentPaintTaskIfNeeded(container, ctm());
+      layer->UpdateScene(context, container);
+    } else {
+      context.AddLayerToCurrentPaintTask(layer.get());
+    }
+  }
+}
+
+#endif  // defined(OS_FUCHSIA)
 
 }  // namespace flow

@@ -11,7 +11,6 @@
 #include "flutter/lib/ui/ui_dart_state.h"
 #include "flutter/lib/ui/window/pointer_data_packet.h"
 #include "flutter/lib/ui/window/window.h"
-#include "flutter/services/engine/sky_engine.mojom.h"
 #include "lib/ftl/macros.h"
 
 namespace blink {
@@ -30,19 +29,16 @@ class RuntimeController : public WindowClient, public IsolateClient {
   void CreateDartController(const std::string& script_uri);
   DartController* dart_controller() const { return dart_controller_.get(); }
 
-  void SetViewportMetrics(const sky::ViewportMetricsPtr& metrics);
+  void SetViewportMetrics(const ViewportMetrics& metrics);
   void SetLocale(const std::string& language_code,
                  const std::string& country_code);
   void SetSemanticsEnabled(bool enabled);
-  void PushRoute(const std::string& route);
-  void PopRoute();
 
   void BeginFrame(ftl::TimePoint frame_time);
 
+  void DispatchPlatformMessage(ftl::RefPtr<PlatformMessage> message);
   void DispatchPointerDataPacket(const PointerDataPacket& packet);
   void DispatchSemanticsAction(int32_t id, SemanticsAction action);
-
-  void OnAppLifecycleStateChanged(sky::AppLifecycleState state);
 
   Dart_Port GetMainPort();
 
@@ -61,7 +57,7 @@ class RuntimeController : public WindowClient, public IsolateClient {
   void DidCreateSecondaryIsolate(Dart_Isolate isolate) override;
 
   RuntimeDelegate* client_;
-  sky::ViewportMetricsPtr viewport_metrics_;
+  ViewportMetrics viewport_metrics_;
   std::string language_code_;
   std::string country_code_;
   bool semantics_enabled_ = false;

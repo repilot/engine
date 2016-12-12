@@ -247,8 +247,9 @@ source_set("platform") {
 
   public_deps = [
     "//flutter/common",
-    "//flutter/skia",
     "//flutter/sky/engine/wtf",
+    "//third_party/skia",
+    "//third_party/skia:gpu",
   ]
 
   if (!is_mac) {
@@ -290,10 +291,7 @@ source_set("platform") {
     ]
 
     deps += [
-      "//mojo/public/cpp/bindings",
-      "//mojo/public/cpp/system",
-      "//mojo/services/ui/fonts/interfaces",
-      "//mojo/system",
+      "//apps/fonts/services",
     ]
   }
 

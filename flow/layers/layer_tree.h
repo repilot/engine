@@ -23,15 +23,21 @@ class LayerTree {
 
   ~LayerTree();
 
+  // Raster includes both Preroll and Paint.
   void Raster(CompositorContext::ScopedFrame& frame,
               bool ignore_raster_cache = false);
+
+  void Preroll(CompositorContext::ScopedFrame& frame,
+               bool ignore_raster_cache = false);
 
 #if defined(OS_FUCHSIA)
   // TODO(abarth): Integrate scene updates with the rasterization pass so that
   // we can draw on top of child scenes (and so that we can apply clips and
   // blending operations to child scene).
-  void UpdateScene(mozart::SceneUpdate* update, mozart::Node* container);
+  void UpdateScene(SceneUpdateContext& context, mozart::Node* container);
 #endif
+
+  void Paint(CompositorContext::ScopedFrame& frame);
 
   Layer* root_layer() const { return root_layer_.get(); }
 
@@ -66,13 +72,17 @@ class LayerTree {
     return rasterizer_tracing_threshold_;
   }
 
+  void set_checkerboard_raster_cache_images(bool checkerboard) {
+    checkerboard_raster_cache_images_ = checkerboard;
+  }
+
  private:
   SkISize frame_size_;  // Physical pixels.
   uint32_t scene_version_;
   std::unique_ptr<Layer> root_layer_;
-
   ftl::TimeDelta construction_time_;
   uint32_t rasterizer_tracing_threshold_;
+  bool checkerboard_raster_cache_images_;
 
   FTL_DISALLOW_COPY_AND_ASSIGN(LayerTree);
 };

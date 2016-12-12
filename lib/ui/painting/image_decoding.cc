@@ -7,15 +7,13 @@
 #include "flutter/common/threads.h"
 #include "flutter/flow/bitmap_image.h"
 #include "flutter/flow/texture_image.h"
-#include "flutter/glue/drain_data_pipe_job.h"
-#include "flutter/glue/movable_wrapper.h"
 #include "flutter/glue/trace_event.h"
 #include "flutter/lib/ui/painting/image.h"
 #include "flutter/lib/ui/painting/resource_context.h"
+#include "lib/ftl/functional/make_copyable.h"
 #include "lib/tonic/dart_persistent_value.h"
 #include "lib/tonic/dart_state.h"
 #include "lib/tonic/logging/dart_invoke.h"
-#include "lib/tonic/mojo/mojo_converter.h"
 #include "lib/tonic/typed_data/uint8_list.h"
 #include "third_party/skia/include/core/SkImageGenerator.h"
 
@@ -26,7 +24,7 @@ using tonic::ToDart;
 namespace blink {
 namespace {
 
-sk_sp<SkImage> DecodeImage(std::vector<char> buffer) {
+sk_sp<SkImage> DecodeImage(std::vector<uint8_t> buffer) {
   TRACE_EVENT0("blink", "DecodeImage");
 
   if (buffer.empty())
@@ -69,42 +67,13 @@ void InvokeImageCallback(sk_sp<SkImage> image,
 }
 
 void DecodeImageAndInvokeImageCallback(
-    glue::MovableWrapper<std::unique_ptr<DartPersistentValue>> callback,
-    std::vector<char> buffer) {
+    std::unique_ptr<DartPersistentValue> callback,
+    std::vector<uint8_t> buffer) {
   sk_sp<SkImage> image = DecodeImage(std::move(buffer));
-  Threads::UI()->PostTask([callback, image]() mutable {
-    InvokeImageCallback(image, callback.Unwrap());
-  });
-}
-
-void DecodeImageFromDataPipe(Dart_NativeArguments args) {
-  Dart_Handle exception = nullptr;
-
-  auto consumer = glue::WrapMovable(
-      tonic::DartConverter<mojo::ScopedDataPipeConsumerHandle>::FromArguments(
-          args, 0, exception));
-  if (exception) {
-    Dart_ThrowException(exception);
-    return;
-  }
-
-  Dart_Handle callback_handle = Dart_GetNativeArgument(args, 1);
-  if (!Dart_IsClosure(callback_handle)) {
-    Dart_ThrowException(ToDart("Callback must be a function"));
-    return;
-  }
-
-  auto callback = glue::WrapMovable(std::unique_ptr<DartPersistentValue>(
-      new DartPersistentValue(tonic::DartState::Current(), callback_handle)));
-
-  Threads::IO()->PostTask([callback, consumer]() mutable {
-    glue::DrainDataPipeJob* job = nullptr;
-    job = new glue::DrainDataPipeJob(
-        consumer.Unwrap(), [callback, job](std::vector<char> buffer) {
-          delete job;
-          DecodeImageAndInvokeImageCallback(callback, std::move(buffer));
-        });
-  });
+  Threads::UI()->PostTask(
+      ftl::MakeCopyable([ callback = std::move(callback), image ]() mutable {
+        InvokeImageCallback(image, std::move(callback));
+      }));
 }
 
 void DecodeImageFromList(Dart_NativeArguments args) {
@@ -123,23 +92,22 @@ void DecodeImageFromList(Dart_NativeArguments args) {
     return;
   }
 
-  auto callback = glue::WrapMovable(std::unique_ptr<DartPersistentValue>(
-      new DartPersistentValue(tonic::DartState::Current(), callback_handle)));
+  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(list.data());
+  std::vector<uint8_t> buffer(bytes, bytes + list.num_elements());
 
-  const char* bytes = reinterpret_cast<const char*>(list.data());
-  auto buffer = glue::WrapMovable(std::unique_ptr<std::vector<char>>(
-      new std::vector<char>(bytes, bytes + list.num_elements())));
-
-  Threads::IO()->PostTask([callback, buffer]() mutable {
-    DecodeImageAndInvokeImageCallback(callback, std::move(*buffer.Unwrap()));
-  });
+  Threads::IO()->PostTask(ftl::MakeCopyable([
+    callback = std::make_unique<DartPersistentValue>(
+        tonic::DartState::Current(), callback_handle),
+    buffer = std::move(buffer)
+  ]() mutable {
+    DecodeImageAndInvokeImageCallback(std::move(callback), std::move(buffer));
+  }));
 }
 
 }  // namespace
 
 void ImageDecoding::RegisterNatives(tonic::DartLibraryNatives* natives) {
   natives->Register({
-      {"decodeImageFromDataPipe", DecodeImageFromDataPipe, 2, true},
       {"decodeImageFromList", DecodeImageFromList, 2, true},
   });
 }

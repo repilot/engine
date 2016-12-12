@@ -9,6 +9,7 @@
 #include "flutter/common/threads.h"
 #include "flutter/lib/ui/painting/resource_context.h"
 #include "flutter/shell/common/rasterizer.h"
+#include "flutter/shell/common/vsync_waiter_fallback.h"
 #include "lib/ftl/functional/make_copyable.h"
 #include "third_party/skia/include/gpu/gl/GrGLInterface.h"
 
@@ -18,12 +19,12 @@ PlatformView::PlatformView(std::unique_ptr<Rasterizer> rasterizer)
     : rasterizer_(std::move(rasterizer)),
       size_(SkISize::Make(0, 0)),
       weak_factory_(this) {
-  engine_.reset(new Engine(this));
+  blink::Threads::UI()->PostTask(
+      [self = GetWeakPtr()] { Shell::Shared().AddPlatformView(self); });
 }
 
 PlatformView::~PlatformView() {
-  blink::Threads::UI()->PostTask(
-      []() { Shell::Shared().PurgePlatformViews(); });
+  blink::Threads::UI()->PostTask([] { Shell::Shared().PurgePlatformViews(); });
 
   Rasterizer* rasterizer = rasterizer_.release();
   blink::Threads::Gpu()->PostTask([rasterizer]() { delete rasterizer; });
@@ -32,11 +33,25 @@ PlatformView::~PlatformView() {
   blink::Threads::UI()->PostTask([engine]() { delete engine; });
 }
 
+void PlatformView::CreateEngine() {
+  engine_.reset(new Engine(this));
+}
+
+void PlatformView::DispatchPlatformMessage(
+    ftl::RefPtr<blink::PlatformMessage> message) {
+  blink::Threads::UI()->PostTask(
+      [ engine = engine_->GetWeakPtr(), message = std::move(message) ] {
+        if (engine) {
+          engine->DispatchPlatformMessage(message);
+        }
+      });
+}
+
 void PlatformView::DispatchSemanticsAction(int32_t id,
                                            blink::SemanticsAction action) {
   blink::Threads::UI()->PostTask(
       [ engine = engine_->GetWeakPtr(), id, action ] {
-        if (engine.get()) {
+        if (engine) {
           engine->DispatchSemanticsAction(
               id, static_cast<blink::SemanticsAction>(action));
         }
@@ -45,21 +60,9 @@ void PlatformView::DispatchSemanticsAction(int32_t id,
 
 void PlatformView::SetSemanticsEnabled(bool enabled) {
   blink::Threads::UI()->PostTask([ engine = engine_->GetWeakPtr(), enabled ] {
-    if (engine.get())
+    if (engine)
       engine->SetSemanticsEnabled(enabled);
   });
-}
-
-void PlatformView::ConnectToEngine(
-    mojo::InterfaceRequest<sky::SkyEngine> request) {
-  blink::Threads::UI()->PostTask(ftl::MakeCopyable([
-    view = GetWeakPtr(), engine = engine().GetWeakPtr(),
-    request = std::move(request)
-  ]() mutable {
-    if (engine.get())
-      engine->ConnectToEngine(std::move(request));
-    Shell::Shared().AddPlatformView(view);
-  }));
 }
 
 void PlatformView::NotifyCreated(std::unique_ptr<Surface> surface) {
@@ -114,11 +117,18 @@ ftl::WeakPtr<PlatformView> PlatformView::GetWeakPtr() {
   return weak_factory_.GetWeakPtr();
 }
 
+VsyncWaiter* PlatformView::GetVsyncWaiter() {
+  if (!vsync_waiter_)
+    vsync_waiter_ = std::make_unique<VsyncWaiterFallback>();
+  return vsync_waiter_.get();
+}
+
 void PlatformView::UpdateSemantics(std::vector<blink::SemanticsNode> update) {}
 
 void PlatformView::HandlePlatformMessage(
     ftl::RefPtr<blink::PlatformMessage> message) {
-  message->InvokeCallbackWithError();
+  if (auto response = message->response())
+    response->CompleteWithError();
 }
 
 void PlatformView::SetupResourceContextOnIOThread() {

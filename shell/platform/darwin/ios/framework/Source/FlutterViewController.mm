@@ -10,32 +10,69 @@
 #include "base/mac/scoped_nsobject.h"
 #include "base/strings/sys_string_conversions.h"
 #include "flutter/common/threads.h"
-#include "flutter/services/platform/ios/system_chrome_impl.h"
 #include "flutter/shell/gpu/gpu_rasterizer.h"
 #include "flutter/shell/gpu/gpu_surface_gl.h"
 #include "flutter/shell/platform/darwin/common/platform_mac.h"
+#include "flutter/shell/platform/darwin/common/string_conversions.h"
 #include "flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject_Internal.h"
+#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterPlatformPlugin.h"
+#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterTextInputDelegate.h"
+#include "flutter/shell/platform/darwin/ios/framework/Source/FlutterTextInputPlugin.h"
 #include "flutter/shell/platform/darwin/ios/framework/Source/flutter_touch_mapper.h"
 #include "flutter/shell/platform/darwin/ios/platform_view_ios.h"
 #include "lib/ftl/functional/make_copyable.h"
 #include "lib/ftl/time/time_delta.h"
 
-@interface FlutterViewController ()<UIAlertViewDelegate>
+namespace {
+
+typedef void (^PlatformMessageResponseCallback)(NSString*);
+
+class PlatformMessageResponseDarwin : public blink::PlatformMessageResponse {
+  FRIEND_MAKE_REF_COUNTED(PlatformMessageResponseDarwin);
+
+ public:
+  void Complete(std::vector<uint8_t> data) override {
+    ftl::RefPtr<PlatformMessageResponseDarwin> self(this);
+    blink::Threads::Platform()->PostTask(
+        ftl::MakeCopyable([ self, data = std::move(data) ]() mutable {
+          self->callback_.get()(shell::GetNSStringFromVector(data));
+        }));
+  }
+
+  void CompleteWithError() override { Complete(std::vector<uint8_t>()); }
+
+ private:
+  explicit PlatformMessageResponseDarwin(
+      PlatformMessageResponseCallback callback)
+      : callback_(callback, base::scoped_policy::RETAIN) {}
+
+  base::mac::ScopedBlock<PlatformMessageResponseCallback> callback_;
+};
+
+}  // namespace
+
+@interface FlutterViewController ()<UIAlertViewDelegate,
+                                    FlutterTextInputDelegate>
 @end
 
 void FlutterInit(int argc, const char* argv[]) {
   NSBundle* bundle = [NSBundle bundleForClass:[FlutterViewController class]];
   NSString* icuDataPath = [bundle pathForResource:@"icudtl" ofType:@"dat"];
-  shell::PlatformMacMain(argc, argv, icuDataPath.UTF8String);
+  NSString* libraryName =
+      [[NSBundle mainBundle] objectForInfoDictionaryKey:@"FLTLibraryPath"];
+  shell::PlatformMacMain(argc, argv, icuDataPath.UTF8String,
+                         libraryName != nil ? libraryName.UTF8String : "");
 }
 
 @implementation FlutterViewController {
   base::scoped_nsprotocol<FlutterDartProject*> _dartProject;
   UIInterfaceOrientationMask _orientationPreferences;
   UIStatusBarStyle _statusBarStyle;
-  sky::ViewportMetricsPtr _viewportMetrics;
+  blink::ViewportMetrics _viewportMetrics;
   shell::TouchMapper _touchMapper;
   std::unique_ptr<shell::PlatformViewIOS> _platformView;
+  base::scoped_nsprotocol<FlutterPlatformPlugin*> _platformPlugin;
+  base::scoped_nsprotocol<FlutterTextInputPlugin*> _textInputPlugin;
 
   BOOL _initialized;
 }
@@ -78,10 +115,16 @@ void FlutterInit(int argc, const char* argv[]) {
 
   _orientationPreferences = UIInterfaceOrientationMaskAll;
   _statusBarStyle = UIStatusBarStyleDefault;
-  _viewportMetrics = sky::ViewportMetrics::New();
   _platformView = std::make_unique<shell::PlatformViewIOS>(
       reinterpret_cast<CAEAGLLayer*>(self.view.layer));
   _platformView->SetupResourceContextOnIOThread();
+
+  _platformPlugin.reset([[FlutterPlatformPlugin alloc] init]);
+  [self addMessageListener:_platformPlugin.get()];
+
+  _textInputPlugin.reset([[FlutterTextInputPlugin alloc] init]);
+  _textInputPlugin.get().textInputDelegate = self;
+  [self addMessageListener:_textInputPlugin.get()];
 
   [self setupNotificationCenterObservers];
 
@@ -92,12 +135,12 @@ void FlutterInit(int argc, const char* argv[]) {
   NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
   [center addObserver:self
              selector:@selector(onOrientationPreferencesUpdated:)
-                 name:@(flutter::platform::kOrientationUpdateNotificationName)
+                 name:@(shell::kOrientationUpdateNotificationName)
                object:nil];
 
   [center addObserver:self
              selector:@selector(onPreferredStatusBarStyleUpdated:)
-                 name:@(flutter::platform::kOverlayStyleUpdateNotificationName)
+                 name:@(shell::kOverlayStyleUpdateNotificationName)
                object:nil];
 
   [center addObserver:self
@@ -141,13 +184,11 @@ void FlutterInit(int argc, const char* argv[]) {
 - (void)connectToEngineAndLoad {
   TRACE_EVENT0("flutter", "connectToEngineAndLoad");
 
-  _platformView->ConnectToEngineAndSetupServices();
-
   // We ask the VM to check what it supports.
   const enum VMType type =
       Dart_IsPrecompiledRuntime() ? VMTypePrecompilation : VMTypeInterpreter;
 
-  [_dartProject launchInEngine:_platformView->engineProxy()
+  [_dartProject launchInEngine:&_platformView->engine()
                 embedderVMType:type
                         result:^(BOOL success, NSString* message) {
                           if (!success) {
@@ -166,30 +207,26 @@ void FlutterInit(int argc, const char* argv[]) {
 #pragma mark - Loading the view
 
 - (void)loadView {
-  FlutterView* surface = [[FlutterView alloc] init];
+  FlutterView* view = [[FlutterView alloc] init];
 
-  self.view = surface;
+  self.view = view;
   self.view.multipleTouchEnabled = YES;
   self.view.autoresizingMask =
       UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
-  [surface release];
+  [view release];
 }
 
 #pragma mark - Application lifecycle notifications
 
 - (void)applicationBecameActive:(NSNotification*)notification {
-  auto& engine = _platformView->engineProxy();
-  if (engine) {
-    engine->OnAppLifecycleStateChanged(sky::AppLifecycleState::RESUMED);
-  }
+  [self sendString:@"AppLifecycleState.resumed"
+      withMessageName:@"flutter/lifecycle"];
 }
 
 - (void)applicationWillResignActive:(NSNotification*)notification {
-  auto& engine = _platformView->engineProxy();
-  if (engine) {
-    engine->OnAppLifecycleStateChanged(sky::AppLifecycleState::PAUSED);
-  }
+  [self sendString:@"AppLifecycleState.paused"
+      withMessageName:@"flutter/lifecycle"];
 }
 
 #pragma mark - Touch event handling
@@ -233,33 +270,31 @@ static inline PointerChangeMapperPhase PointerChangePhaseFromUITouchPhase(
 
   int i = 0;
   for (UITouch* touch in touches) {
-    int touch_identifier = 0;
+    int device_id = 0;
 
     switch (eventTypePhase.second) {
       case Accessed:
-        touch_identifier = _touchMapper.identifierOf(touch);
+        device_id = _touchMapper.identifierOf(touch);
         break;
       case Added:
-        touch_identifier = _touchMapper.registerTouch(touch);
+        device_id = _touchMapper.registerTouch(touch);
         break;
       case Removed:
-        touch_identifier = _touchMapper.unregisterTouch(touch);
+        device_id = _touchMapper.unregisterTouch(touch);
         break;
     }
 
-    DCHECK(touch_identifier != 0);
+    DCHECK(device_id != 0);
     CGPoint windowCoordinates = [touch locationInView:nil];
-
-    auto pointer_time =
-        ftl::TimeDelta::FromSeconds(touch.timestamp).ToMicroseconds();
 
     blink::PointerData pointer_data;
     pointer_data.Clear();
 
-    pointer_data.time_stamp = pointer_time;
+    constexpr int kMicrosecondsPerSecond = 1000 * 1000;
+    pointer_data.time_stamp = touch.timestamp * kMicrosecondsPerSecond;
     pointer_data.change = eventTypePhase.first;
     pointer_data.kind = blink::PointerData::DeviceKind::kTouch;
-    pointer_data.pointer = touch_identifier;
+    pointer_data.device = device_id;
     pointer_data.physical_x = windowCoordinates.x * scale;
     pointer_data.physical_y = windowCoordinates.y * scale;
     pointer_data.pressure = 1.0;
@@ -294,18 +329,28 @@ static inline PointerChangeMapperPhase PointerChangePhaseFromUITouchPhase(
 
 #pragma mark - Handle view resizing
 
+- (void)updateViewportMetrics {
+  blink::Threads::UI()->PostTask([
+    weak_platform_view = _platformView->GetWeakPtr(), metrics = _viewportMetrics
+  ] {
+    if (!weak_platform_view) {
+      return;
+    }
+    weak_platform_view->UpdateSurfaceSize();
+    weak_platform_view->engine().SetViewportMetrics(metrics);
+  });
+}
+
 - (void)viewDidLayoutSubviews {
   CGSize size = self.view.bounds.size;
   CGFloat scale = [UIScreen mainScreen].scale;
 
-  _viewportMetrics->device_pixel_ratio = scale;
-  _viewportMetrics->physical_width = size.width * scale;
-  _viewportMetrics->physical_height = size.height * scale;
-  _viewportMetrics->physical_padding_top =
+  _viewportMetrics.device_pixel_ratio = scale;
+  _viewportMetrics.physical_width = size.width * scale;
+  _viewportMetrics.physical_height = size.height * scale;
+  _viewportMetrics.physical_padding_top =
       [UIApplication sharedApplication].statusBarFrame.size.height * scale;
-
-  _platformView->engineProxy()->OnViewportMetricsChanged(
-      _viewportMetrics.Clone());
+  [self updateViewportMetrics];
 }
 
 #pragma mark - Keyboard events
@@ -315,15 +360,23 @@ static inline PointerChangeMapperPhase PointerChangePhaseFromUITouchPhase(
   CGFloat bottom = CGRectGetHeight(
       [[info objectForKey:UIKeyboardFrameBeginUserInfoKey] CGRectValue]);
   CGFloat scale = [UIScreen mainScreen].scale;
-  _viewportMetrics->physical_padding_bottom = bottom * scale;
-  _platformView->engineProxy()->OnViewportMetricsChanged(
-      _viewportMetrics.Clone());
+  _viewportMetrics.physical_padding_bottom = bottom * scale;
+  [self updateViewportMetrics];
 }
 
 - (void)keyboardWillBeHidden:(NSNotification*)notification {
-  _viewportMetrics->physical_padding_bottom = 0.0;
-  _platformView->engineProxy()->OnViewportMetricsChanged(
-      _viewportMetrics.Clone());
+  _viewportMetrics.physical_padding_bottom = 0;
+  [self updateViewportMetrics];
+}
+
+#pragma mark - Text input delegate
+
+- (void)updateEditingClient:(int)client withState:(NSDictionary*)state {
+  NSDictionary* message = @{
+    @"method" : @"TextInputClient.updateEditingState",
+    @"args" : @[ @(client), state ],
+  };
+  [self sendJSON:message withMessageName:@"flutter/textinputclient"];
 }
 
 #pragma mark - Orientation updates
@@ -333,8 +386,7 @@ static inline PointerChangeMapperPhase PointerChangePhaseFromUITouchPhase(
   dispatch_async(dispatch_get_main_queue(), ^{
     NSDictionary* info = notification.userInfo;
 
-    NSNumber* update =
-        info[@(flutter::platform::kOrientationUpdateNotificationKey)];
+    NSNumber* update = info[@(shell::kOrientationUpdateNotificationKey)];
 
     if (update == nil) {
       return;
@@ -377,8 +429,10 @@ static inline PointerChangeMapperPhase PointerChangePhaseFromUITouchPhase(
   NSLocale* currentLocale = [NSLocale currentLocale];
   NSString* languageCode = [currentLocale objectForKey:NSLocaleLanguageCode];
   NSString* countryCode = [currentLocale objectForKey:NSLocaleCountryCode];
-  _platformView->engineProxy()->OnLocaleChanged(languageCode.UTF8String,
-                                                countryCode.UTF8String);
+  NSDictionary* message =
+      @{ @"method" : @"setLocale",
+         @"args" : @[ languageCode, countryCode ] };
+  [self sendJSON:message withMessageName:@"flutter/localization"];
 }
 
 #pragma mark - Surface creation and teardown updates
@@ -424,8 +478,7 @@ static inline PointerChangeMapperPhase PointerChangePhaseFromUITouchPhase(
   dispatch_async(dispatch_get_main_queue(), ^{
     NSDictionary* info = notification.userInfo;
 
-    NSNumber* update =
-        info[@(flutter::platform::kOverlayStyleUpdateNotificationKey)];
+    NSNumber* update = info[@(shell::kOverlayStyleUpdateNotificationKey)];
 
     if (update == nil) {
       return;
@@ -442,43 +495,52 @@ static inline PointerChangeMapperPhase PointerChangePhaseFromUITouchPhase(
 
 #pragma mark - Application Messages
 
-- (void)sendString:(NSString*)message withMessageName:(NSString*)messageName {
+- (void)sendString:(NSString*)message withMessageName:(NSString*)channel {
   NSAssert(message, @"The message must not be null");
-  NSAssert(messageName, @"The messageName must not be null");
-  _platformView->AppMessageSender()->SendString(
-      messageName.UTF8String, message.UTF8String,
-      [](const mojo::String& response) {});
+  NSAssert(channel, @"The channel must not be null");
+  _platformView->DispatchPlatformMessage(
+      ftl::MakeRefCounted<blink::PlatformMessage>(
+          channel.UTF8String, shell::GetVectorFromNSString(message), nullptr));
 }
 
 - (void)sendString:(NSString*)message
-    withMessageName:(NSString*)messageName
+    withMessageName:(NSString*)channel
            callback:(void (^)(NSString*))callback {
   NSAssert(message, @"The message must not be null");
-  NSAssert(messageName, @"The messageName must not be null");
+  NSAssert(channel, @"The channel must not be null");
   NSAssert(callback, @"The callback must not be null");
-  base::mac::ScopedBlock<void (^)(NSString*)> callback_ptr(
-      callback, base::scoped_policy::RETAIN);
-  _platformView->AppMessageSender()->SendString(
-      messageName.UTF8String, message.UTF8String,
-      [callback_ptr](const mojo::String& response) {
-        callback_ptr.get()(base::SysUTF8ToNSString(response));
-      });
+  _platformView->DispatchPlatformMessage(
+      ftl::MakeRefCounted<blink::PlatformMessage>(
+          channel.UTF8String, shell::GetVectorFromNSString(message),
+          ftl::MakeRefCounted<PlatformMessageResponseDarwin>(callback)));
+}
+
+- (void)sendJSON:(NSDictionary*)message withMessageName:(NSString*)channel {
+  NSData* data =
+      [NSJSONSerialization dataWithJSONObject:message options:0 error:nil];
+  if (!data)
+    return;
+  const uint8_t* bytes = static_cast<const uint8_t*>(data.bytes);
+  _platformView->DispatchPlatformMessage(
+      ftl::MakeRefCounted<blink::PlatformMessage>(
+          channel.UTF8String, std::vector<uint8_t>(bytes, bytes + data.length),
+          nullptr));
 }
 
 - (void)addMessageListener:(NSObject<FlutterMessageListener>*)listener {
   NSAssert(listener, @"The listener must not be null");
-  NSString* messageName = listener.messageName;
-  NSAssert(messageName, @"The messageName must not be null");
-  _platformView->AppMessageReceiver().SetMessageListener(messageName.UTF8String,
-                                                         listener);
+  NSString* channel = listener.messageName;
+  NSAssert(channel, @"The channel must not be null");
+  _platformView->platform_message_router().SetMessageListener(
+      channel.UTF8String, listener);
 }
 
 - (void)removeMessageListener:(NSObject<FlutterMessageListener>*)listener {
   NSAssert(listener, @"The listener must not be null");
-  NSString* messageName = listener.messageName;
-  NSAssert(messageName, @"The messageName must not be null");
-  _platformView->AppMessageReceiver().SetMessageListener(messageName.UTF8String,
-                                                         nil);
+  NSString* channel = listener.messageName;
+  NSAssert(channel, @"The channel must not be null");
+  _platformView->platform_message_router().SetMessageListener(
+      channel.UTF8String, nil);
 }
 
 - (void)addAsyncMessageListener:
@@ -486,7 +548,7 @@ static inline PointerChangeMapperPhase PointerChangePhaseFromUITouchPhase(
   NSAssert(listener, @"The listener must not be null");
   NSString* messageName = listener.messageName;
   NSAssert(messageName, @"The messageName must not be null");
-  _platformView->AppMessageReceiver().SetAsyncMessageListener(
+  _platformView->platform_message_router().SetAsyncMessageListener(
       messageName.UTF8String, listener);
 }
 
@@ -495,7 +557,7 @@ static inline PointerChangeMapperPhase PointerChangePhaseFromUITouchPhase(
   NSAssert(listener, @"The listener must not be null");
   NSString* messageName = listener.messageName;
   NSAssert(messageName, @"The messageName must not be null");
-  _platformView->AppMessageReceiver().SetAsyncMessageListener(
+  _platformView->platform_message_router().SetAsyncMessageListener(
       messageName.UTF8String, nil);
 }
 

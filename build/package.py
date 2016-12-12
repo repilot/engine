@@ -14,47 +14,46 @@ def main():
 
   parser.add_argument('--root', type=str, required=True,
                       help='The root of the output directory')
+  parser.add_argument('--flutter-root', type=str, required=True,
+                      help='The root of the Flutter SDK')
   parser.add_argument('--dart', type=str, required=True,
                       help='The Dart binary to use')
   parser.add_argument('--flutter-tools-packages', type=str, required=True,
                       help='The package map for the Flutter tool')
   parser.add_argument('--flutter-tools-main', type=str, required=True,
                       help='The main.dart file for the Flutter tool')
-  parser.add_argument('--snapshotter-path', type=str, required=True,
-                      help='The Flutter snapshotter')
   parser.add_argument('--working-dir', type=str, required=True,
                       help='The directory where to put intermediate files')
   parser.add_argument('--app-dir', type=str, required=True,
                       help='The root of the app')
-  parser.add_argument('--main-dart', type=str, required=True,
-                      help='The main.dart file to use')
   parser.add_argument('--packages', type=str, required=True,
                       help='The package map to use')
   parser.add_argument('--snapshot', type=str, required=True,
                       help='Path to application snapshot')
-  parser.add_argument('--depfile', type=str, required=True,
-                      help='Where to output dependency information')
   parser.add_argument('--output-file', type=str, required=True,
                       help='Where to output application bundle')
+  parser.add_argument('--manifest', type=str, help='The application manifest')
 
   args = parser.parse_args()
 
   env = os.environ.copy()
   env['LD_LIBRARY_PATH'] = args.root
+  env['FLUTTER_ROOT'] = args.flutter_root
 
-  result = subprocess.call([
+  call_args = [
     args.dart,
     '--packages=%s' % args.flutter_tools_packages,
     args.flutter_tools_main,
-    '--snapshotter-path=%s' % args.snapshotter_path,
     '--working-dir=%s' % args.working_dir,
-    '--target=%s' % args.main_dart,
     '--packages=%s' % args.packages,
     '--snapshot=%s' % args.snapshot,
-    '--depfile=%s' % args.depfile,
     '--output-file=%s' % args.output_file,
-    '--header=#!mojo mojo:flutter_content_handler',
-  ], env=env, cwd=args.app_dir)
+    '--header=#!fuchsia file:///system/apps/flutter_runner',
+  ]
+  if 'manifest' in args:
+    call_args.append('--manifest=%s' % args.manifest)
+
+  result = subprocess.call(call_args, env=env, cwd=args.app_dir)
 
   return result
 

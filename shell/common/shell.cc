@@ -22,22 +22,17 @@
 #include "flutter/common/threads.h"
 #include "flutter/glue/task_runner_adaptor.h"
 #include "flutter/runtime/dart_init.h"
+#include "flutter/shell/common/diagnostic/diagnostic_server.h"
 #include "flutter/shell/common/engine.h"
 #include "flutter/shell/common/platform_view_service_protocol.h"
+#include "flutter/shell/common/skia_event_tracer_impl.h"
 #include "flutter/shell/common/switches.h"
-#include "flutter/shell/common/diagnostic/diagnostic_server.h"
-#include "flutter/skia/ext/event_tracer_impl.h"
 #include "lib/ftl/files/unique_fd.h"
-#include "mojo/message_pump/message_pump_mojo.h"
 
 namespace shell {
 namespace {
 
 static Shell* g_shell = nullptr;
-
-scoped_ptr<base::MessagePump> CreateMessagePumpMojo() {
-  return make_scoped_ptr(new mojo::common::MessagePumpMojo);
-}
 
 bool IsInvalid(const ftl::WeakPtr<Rasterizer>& rasterizer) {
   return !rasterizer;
@@ -82,7 +77,6 @@ Shell::Shell() {
   DCHECK(!g_shell);
 
   base::Thread::Options options;
-  options.message_pump_factory = base::Bind(&CreateMessagePumpMojo);
 
   gpu_thread_.reset(new base::Thread("gpu_thread"));
   gpu_thread_->StartWithOptions(options);
@@ -113,7 +107,8 @@ Shell::Shell() {
 
 Shell::~Shell() {}
 
-void Shell::InitStandalone(std::string icu_data_path) {
+void Shell::InitStandalone(std::string icu_data_path,
+                           std::string application_library_path) {
   TRACE_EVENT0("flutter", "Shell::InitStandalone");
 
   ftl::UniqueFD icu_fd(
@@ -132,13 +127,16 @@ void Shell::InitStandalone(std::string icu_data_path) {
   base::CommandLine& command_line = *base::CommandLine::ForCurrentProcess();
 
   blink::Settings settings;
+  settings.application_library_path = application_library_path;
+
   // Enable Observatory
   settings.enable_observatory =
-      !command_line.HasSwitch(switches::kDisableObservatory);
+      !command_line.HasSwitch(FlagForSwitch(Switch::DisableObservatory));
+
   // Set Observatory Port
-  if (command_line.HasSwitch(switches::kDeviceObservatoryPort)) {
-    auto port_string =
-        command_line.GetSwitchValueASCII(switches::kDeviceObservatoryPort);
+  if (command_line.HasSwitch(FlagForSwitch(Switch::DeviceObservatoryPort))) {
+    auto port_string = command_line.GetSwitchValueASCII(
+        FlagForSwitch(Switch::DeviceObservatoryPort));
     std::stringstream stream(port_string);
     uint32_t port = 0;
     if (stream >> port) {
@@ -149,26 +147,43 @@ void Shell::InitStandalone(std::string icu_data_path) {
           << settings.observatory_port;
     }
   }
-  settings.start_paused = command_line.HasSwitch(switches::kStartPaused);
-  settings.endless_trace_buffer =
-      command_line.HasSwitch(switches::kEndlessTraceBuffer);
-  settings.trace_startup = command_line.HasSwitch(switches::kTraceStartup);
-  settings.aot_snapshot_path =
-      command_line.GetSwitchValueASCII(switches::kAotSnapshotPath);
-  settings.aot_isolate_snapshot_file_name =
-      command_line.GetSwitchValueASCII(switches::kAotIsolateSnapshot);
-  settings.aot_vm_isolate_snapshot_file_name =
-      command_line.GetSwitchValueASCII(switches::kAotVmIsolateSnapshot);
-  settings.aot_instructions_blob_file_name =
-      command_line.GetSwitchValueASCII(switches::kAotInstructionsBlob);
-  settings.aot_rodata_blob_file_name =
-      command_line.GetSwitchValueASCII(switches::kAotRodataBlob);
-  settings.temp_directory_path =
-      command_line.GetSwitchValueASCII(switches::kCacheDirPath);
 
-  if (command_line.HasSwitch(switches::kDartFlags)) {
+  settings.start_paused =
+      command_line.HasSwitch(FlagForSwitch(Switch::StartPaused));
+
+  settings.enable_dart_profiling =
+      command_line.HasSwitch(FlagForSwitch(Switch::EnableDartProfiling));
+
+  settings.endless_trace_buffer =
+      command_line.HasSwitch(FlagForSwitch(Switch::EndlessTraceBuffer));
+
+  settings.trace_startup =
+      command_line.HasSwitch(FlagForSwitch(Switch::TraceStartup));
+
+  settings.aot_snapshot_path =
+      command_line.GetSwitchValueASCII(FlagForSwitch(Switch::AotSnapshotPath));
+
+  settings.aot_isolate_snapshot_file_name = command_line.GetSwitchValueASCII(
+      FlagForSwitch(Switch::AotIsolateSnapshot));
+
+  settings.aot_vm_isolate_snapshot_file_name = command_line.GetSwitchValueASCII(
+      FlagForSwitch(Switch::AotVmIsolateSnapshot));
+
+  settings.aot_instructions_blob_file_name = command_line.GetSwitchValueASCII(
+      FlagForSwitch(Switch::AotInstructionsBlob));
+
+  settings.aot_rodata_blob_file_name =
+      command_line.GetSwitchValueASCII(FlagForSwitch(Switch::AotRodataBlob));
+
+  settings.temp_directory_path =
+      command_line.GetSwitchValueASCII(FlagForSwitch(Switch::CacheDirPath));
+
+  settings.use_test_fonts =
+      command_line.HasSwitch(FlagForSwitch(Switch::UseTestFonts));
+
+  if (command_line.HasSwitch(FlagForSwitch(Switch::DartFlags))) {
     std::stringstream stream(
-        command_line.GetSwitchValueNative(switches::kDartFlags));
+        command_line.GetSwitchValueNative(FlagForSwitch(Switch::DartFlags)));
     std::istream_iterator<std::string> end;
     for (std::istream_iterator<std::string> it(stream); it != end; ++it)
       settings.dart_flags.push_back(*it);
@@ -316,7 +331,7 @@ void Shell::RunInPlatformViewUIThread(uintptr_t view_id,
     PlatformView* view = it->get();
     if (reinterpret_cast<uintptr_t>(view) == view_id) {
       *view_existed = true;
-      view->RunFromSource(main, packages, assets_directory);
+      view->RunFromSource(assets_directory, main, packages);
       *dart_isolate_id = view->engine().GetUIIsolateMainPort();
       *isolate_name = view->engine().GetUIIsolateName();
       break;

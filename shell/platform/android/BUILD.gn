@@ -11,6 +11,7 @@ generate_jni("jni_headers") {
   sources = [
     "io/flutter/view/FlutterMain.java",
     "io/flutter/view/FlutterView.java",
+    "io/flutter/view/VsyncWaiter.java",
   ]
   jni_package = "shell"
 }
@@ -32,6 +33,8 @@ shared_library("sky_shell") {
     "library_loader.cc",
     "platform_view_android.cc",
     "platform_view_android.h",
+    "vsync_waiter_android.cc",
+    "vsync_waiter_android.h",
   ]
 
   deps = [
@@ -44,12 +47,9 @@ shared_library("sky_shell") {
     "//flutter/runtime",
     "//flutter/shell/common",
     "//flutter/shell/gpu",
-    "//flutter/skia",
     "//flutter/vulkan",
     "//lib/ftl",
-    "//mojo/android:libsystem_java",
-    "//mojo/edk/base_edk",
-    "//mojo/edk/system",
+    "//third_party/skia",
     ":jni_headers",
   ]
 
@@ -64,40 +64,27 @@ android_library("java") {
   visibility = [ ":*" ]
 
   java_files = [
+    "io/flutter/app/FlutterActivity.java",
+    "io/flutter/app/FlutterApplication.java",
+    "io/flutter/plugin/common/ActivityLifecycleListener.java",
+    "io/flutter/plugin/common/JSONMessageListener.java",
+    "io/flutter/plugin/editing/InputConnectionAdaptor.java",
+    "io/flutter/plugin/editing/TextInputPlugin.java",
+    "io/flutter/plugin/platform/PlatformPlugin.java",
     "io/flutter/view/AccessibilityBridge.java",
     "io/flutter/view/FlutterMain.java",
     "io/flutter/view/FlutterView.java",
     "io/flutter/view/ResourceCleaner.java",
     "io/flutter/view/ResourceExtractor.java",
-    "io/flutter/view/ServiceFactory.java",
-    "io/flutter/view/ServiceProviderImpl.java",
-    "io/flutter/view/ServiceRegistry.java",
+    "io/flutter/view/ResourcePaths.java",
+    "io/flutter/view/VsyncWaiter.java",
+    # Deprecated classes provided for backwards compatibility
     "org/domokit/sky/shell/SkyActivity.java",
     "org/domokit/sky/shell/SkyApplication.java",
   ]
 
   deps = [
     "//base:base_java",
-    "//flutter/services/activity:activity_lib",
-    "//flutter/services/activity:interfaces_java",
-    "//flutter/services/common:common_lib",
-    "//flutter/services/editing:editing_lib",
-    "//flutter/services/editing:interfaces_java",
-    "//flutter/services/engine:interfaces_java",
-    "//flutter/services/media:interfaces_java",
-    "//flutter/services/media:media_lib",
-    "//flutter/services/platform:interfaces_java",
-    "//flutter/services/platform:platform_lib",
-    "//flutter/services/raw_keyboard:interfaces_java",
-    "//flutter/services/raw_keyboard:raw_keyboard_lib",
-    "//flutter/services/sensors:sensors_lib",
-    "//flutter/services/vsync:vsync_lib",
-    "//mojo/android:system_java",
-    "//mojo/public/interfaces/application:application_java",
-    "//mojo/public/java:bindings",
-    "//mojo/public/java:system",
-    "//mojo/services/sensors/interfaces:interfaces_java",
-    "//mojo/services/vsync/interfaces:interfaces_java",
   ]
 }
 

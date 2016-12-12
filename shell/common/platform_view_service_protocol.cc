@@ -11,10 +11,10 @@
 
 #include "base/base64.h"
 #include "flutter/common/threads.h"
+#include "flutter/shell/common/picture_serializer.h"
 #include "flutter/shell/common/rasterizer.h"
 #include "flutter/shell/common/shell.h"
 #include "lib/ftl/memory/weak_ptr.h"
-#include "third_party/skia/include/core/SkImageEncoder.h"
 #include "third_party/skia/include/core/SkSurface.h"
 
 namespace shell {
@@ -103,10 +103,10 @@ static void AppendFlutterView(std::stringstream* stream,
                               int64_t isolate_id,
                               const std::string isolate_name) {
   *stream << "{\"type\":\"FlutterView\", \"id\": \"" << kViewIdPrefx << "0x"
-          << std::hex << view_id << std::dec;
+          << std::hex << view_id << std::dec << "\"";
   if (isolate_id != ILLEGAL_PORT) {
     // Append the isolate (if it exists).
-    *stream << "\","
+    *stream << ","
             << "\"isolate\":";
     AppendIsolateRef(stream, isolate_id, isolate_name);
   }
@@ -235,6 +235,22 @@ bool PlatformViewServiceProtocol::ListViews(const char* method,
 const char* PlatformViewServiceProtocol::kScreenshotExtensionName =
     "_flutter.screenshot";
 
+static sk_sp<SkData> EncodeBitmapAsPNG(const SkBitmap& bitmap) {
+  if (bitmap.empty()) {
+    return nullptr;
+  }
+
+  SkPixmap pixmap;
+  if (!bitmap.peekPixels(&pixmap)) {
+    return nullptr;
+  }
+
+  PngPixelSerializer serializer;
+  sk_sp<SkData> data(serializer.encode(pixmap));
+
+  return data;
+}
+
 bool PlatformViewServiceProtocol::Screenshot(const char* method,
                                              const char** param_keys,
                                              const char** param_values,
@@ -250,11 +266,7 @@ bool PlatformViewServiceProtocol::Screenshot(const char* method,
 
   latch.Wait();
 
-  if (bitmap.empty())
-    return ErrorServer(json_object, "no screenshot available");
-
-  sk_sp<SkData> png(SkImageEncoder::EncodeData(
-      bitmap, SkImageEncoder::Type::kPNG_Type, SkImageEncoder::kDefaultQuality));
+  sk_sp<SkData> png(EncodeBitmapAsPNG(bitmap));
 
   if (!png)
     return ErrorServer(json_object, "can not encode screenshot");
@@ -295,7 +307,7 @@ void PlatformViewServiceProtocol::ScreenshotGpuTask(SkBitmap* bitmap) {
   flow::CompositorContext compositor_context;
   SkCanvas* canvas = surface->getCanvas();
   flow::CompositorContext::ScopedFrame frame =
-      compositor_context.AcquireFrame(nullptr, *canvas, false);
+      compositor_context.AcquireFrame(nullptr, canvas, false);
 
   canvas->clear(SK_ColorBLACK);
   layer_tree->Raster(frame);

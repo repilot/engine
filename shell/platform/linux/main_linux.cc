@@ -8,25 +8,23 @@
 #include "base/command_line.h"
 #include "base/logging.h"
 #include "base/message_loop/message_loop.h"
+#include "flutter/common/threads.h"
 #include "flutter/shell/common/shell.h"
 #include "flutter/shell/common/switches.h"
 #include "flutter/shell/gpu/gpu_surface_gl.h"
 #include "flutter/shell/platform/linux/message_pump_glfw.h"
 #include "flutter/shell/platform/linux/platform_view_glfw.h"
 #include "flutter/shell/testing/testing.h"
-#include "mojo/edk/embedder/embedder.h"
-#include "mojo/edk/embedder/simple_platform_support.h"
 
 namespace {
 
 int RunNonInteractive() {
   base::MessageLoop message_loop;
 
-  mojo::embedder::Init(mojo::embedder::CreateSimplePlatformSupport());
   shell::Shell::InitStandalone();
 
   if (!shell::InitForTesting()) {
-    shell::switches::PrintUsage("sky_shell");
+    shell::PrintUsage("sky_shell");
     return 1;
   }
 
@@ -34,10 +32,9 @@ int RunNonInteractive() {
   return 0;
 }
 
-static bool IsDartFile(const std::string& script_uri) {
+static bool IsDartFile(const std::string& path) {
   std::string dart_extension = ".dart";
-  return script_uri.rfind(dart_extension) ==
-         (script_uri.size() - dart_extension.size());
+  return path.rfind(dart_extension) == (path.size() - dart_extension.size());
 }
 
 int RunInteractive() {
@@ -45,40 +42,39 @@ int RunInteractive() {
 
   base::MessageLoop message_loop(shell::MessagePumpGLFW::Create());
 
-  mojo::embedder::Init(mojo::embedder::CreateSimplePlatformSupport());
   shell::Shell::InitStandalone();
 
-  std::string bundle_path =
-      command_line.GetSwitchValueASCII(shell::switches::kFLX);
+  std::string target = command_line.GetSwitchValueASCII(
+      shell::FlagForSwitch(shell::Switch::FLX));
 
-  if (bundle_path.empty()) {
+  if (target.empty()) {
     // Alternatively, use the first positional argument.
     auto args = command_line.GetArgs();
     if (args.empty())
       return 1;
-    bundle_path = args[0];
+    target = args[0];
   }
 
-  if (bundle_path.empty())
+  if (target.empty())
     return 1;
 
   std::unique_ptr<shell::PlatformViewGLFW> platform_view(
       new shell::PlatformViewGLFW());
 
-  platform_view->ConnectToEngineAndSetupServices();
-
   platform_view->NotifyCreated(
       std::make_unique<shell::GPUSurfaceGL>(platform_view.get()));
 
-  if (IsDartFile(bundle_path)) {
-    // Load directly from source.
-    platform_view->EngineProxy()->RunFromFile(bundle_path, "", "");
+  blink::Threads::UI()->PostTask(
+      [ engine = platform_view->engine().GetWeakPtr(), target ] {
+        if (engine) {
+          if (IsDartFile(target)) {
+            engine->RunBundleAndSource(std::string(), target, std::string());
 
-  } else {
-    // Load from a bundle.
-    std::string script_uri = std::string("file://") + bundle_path;
-    platform_view->EngineProxy()->RunFromBundle(script_uri, bundle_path);
-  }
+          } else {
+            engine->RunBundle(target);
+          }
+        }
+      });
 
   message_loop.Run();
 
@@ -95,12 +91,13 @@ int main(int argc, const char* argv[]) {
 
   base::CommandLine& command_line = *base::CommandLine::ForCurrentProcess();
 
-  if (command_line.HasSwitch(shell::switches::kHelp)) {
-    shell::switches::PrintUsage("sky_shell");
+  if (command_line.HasSwitch(shell::FlagForSwitch(shell::Switch::Help))) {
+    shell::PrintUsage("sky_shell");
     return 0;
   }
 
-  if (command_line.HasSwitch(shell::switches::kNonInteractive)) {
+  if (command_line.HasSwitch(
+          shell::FlagForSwitch(shell::Switch::NonInteractive))) {
     return RunNonInteractive();
   }
 
